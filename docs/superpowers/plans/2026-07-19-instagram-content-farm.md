@@ -2406,17 +2406,15 @@ python -c "
 import os
 from datetime import date
 from pathlib import Path
-from pipeline import generate, reddit_source
+from pipeline import generate
 
-token = reddit_source.get_access_token(
-    os.environ['REDDIT_CLIENT_ID'], os.environ['REDDIT_CLIENT_SECRET'],
-    os.environ['REDDIT_USER_AGENT'],
-)
 generate.generate_week(
     start_date=date.today(), queue_path=Path('content/queue.json'),
     work_dir=Path('.work'), repo_root=Path('.'),
     repo_owner='<owner>', repo_name='<repo>', audio_path=Path('<royalty-free-audio.mp3>'),
-    reddit_access_token=token, reddit_user_agent=os.environ['REDDIT_USER_AGENT'],
+    reddit_client_id=os.environ['REDDIT_CLIENT_ID'],
+    reddit_client_secret=os.environ['REDDIT_CLIENT_SECRET'],
+    reddit_user_agent=os.environ['REDDIT_USER_AGENT'],
     seen_path=Path('content/reddit_seen.json'),
 )
 "

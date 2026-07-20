@@ -114,11 +114,18 @@ def _produce_repost(*, slot_type: str, work_dir: Path, day_label: str, subreddit
 
 def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
                    repo_root: Path, repo_owner: str, repo_name: str,
-                   audio_path: Path, reddit_access_token: str,
+                   audio_path: Path, reddit_client_id: str, reddit_client_secret: str,
                    reddit_user_agent: str, seen_path: Path) -> list[dict]:
     work_dir.mkdir(parents=True, exist_ok=True)
     created = []
     templates = template_source.list_templates()
+
+    try:
+        reddit_access_token = reddit_source.get_access_token(
+            reddit_client_id, reddit_client_secret, reddit_user_agent,
+        )
+    except reddit_source.RedditSourceError:
+        reddit_access_token = None
 
     for offset in range(7):
         day = start_date + timedelta(days=offset)
@@ -137,11 +144,17 @@ def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
                     templates=templates, day_index=offset,
                 )
             elif source == "repost":
-                result = _produce_repost(
-                    slot_type=slot_type, work_dir=work_dir, day_label=day_label,
-                    subreddit=subreddit, access_token=reddit_access_token,
-                    user_agent=reddit_user_agent, seen_path=seen_path,
-                )
+                if reddit_access_token is None:
+                    result = None
+                else:
+                    try:
+                        result = _produce_repost(
+                            slot_type=slot_type, work_dir=work_dir, day_label=day_label,
+                            subreddit=subreddit, access_token=reddit_access_token,
+                            user_agent=reddit_user_agent, seen_path=seen_path,
+                        )
+                    except reddit_source.RedditSourceError:
+                        result = None
                 if result is None:
                     source = "original"
 
