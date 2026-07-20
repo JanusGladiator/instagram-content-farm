@@ -1150,7 +1150,7 @@ def render_caption_on_template(template_image: Path, top_text: str, bottom_text:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_template_source.py -v`
-Expected: PASS (7 passed)
+Expected: PASS (8 passed)
 
 - [ ] **Step 5: Commit**
 
