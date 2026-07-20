@@ -137,23 +137,47 @@ crediting.
         host Graph API requires — see "Asset Hosting")
       → new entry appended to content/queue.json
         (status: pending, scheduled_date: that day's date, source recorded)
-  → publish/update the week's review page (Artifact, state capability)
+  → publish/update the week's review page (Artifact)
   → push notification to user: "week's batch ready for review"
 
 [User]
   → opens the Artifact review page once
   → approves or rejects each of the 14 items (or bulk-approves)
-  → no further interaction required for the rest of the week
+  → clicks Export, which downloads a copy of queue.json with each
+    item's status patched to approved/rejected
+  → hands that file back in a live Claude Code session, whenever
+    convenient that week (no fixed deadline)
+
+[Claude, in that live session]
+  → commits the exported file over content/queue.json in the repo,
+    replacing the all-pending version Generate created
 
 [Publish agent — daily, two fires]
   → 12:00: find today's queue.json entry where type=post,
     scheduled_date=today, status=approved → publish via Graph API →
     status=posted
   → 20:00: same for type=reel
-  → if today's entry is still status=pending (not reviewed in time):
-    skip it, log it, do NOT auto-post it, and do NOT re-prompt the user
-    (the weekly review window was the point where they signed off)
+  → if today's entry is still status=pending (review/export/handoff
+    hasn't happened yet, or the item was left unreviewed): skip it,
+    log it, do NOT auto-post it, and do NOT re-prompt the user
 ```
+
+### Why not automatic approval sync
+
+The original design assumed Artifacts could persist approve/reject
+decisions somewhere a scheduled routine could read back automatically.
+Verified against the actual runtime capability contract while building
+Task 14 (see the implementation plan): no such persisted-state capability
+exists. The only two capabilities available are `downloads` (one-way,
+viewer-initiated file save — not queryable by an agent) and `mcp` (calls a
+connector the viewer has already connected — no GitHub connector exists in
+this environment). Rather than guess at an unavailable API, the review
+page uses `downloads` plus an Export button, and the human handoff (export
+→ tell Claude → Claude commits) replaces the automatic sync step. This
+still satisfies "approve once for the week, then hands-off" — the Publish
+routines never need the user again once the exported file is committed —
+it just moves the one required human action from "click approve in a page
+a routine can see" to "click approve, then mention it once in chat."
 
 ### Why two phases + two daily publish fires
 
@@ -215,9 +239,13 @@ crediting.
   `asset_url` and a `caption`, never a `source`.
 - **Review Artifact page** — renders the week's 14 items (thumbnail/video
   preview, caption, hashtags, source) with approve/reject controls per
-  item. Uses the Artifact state capability so approve/reject writes back to
-  `content/queue.json` status. (Implementation must load the
-  `artifact-capabilities` skill before building this page.)
+  item. Decisions persist in the browser (`localStorage`) and an Export
+  button downloads a patched copy of `queue.json`; there is no capability
+  that lets a scheduled routine read this page's decisions back
+  automatically (see "Why not automatic approval sync" above) — the user
+  hands the exported file back in a live chat session instead.
+  (Implementation must load the `artifact-capabilities` skill before
+  building this page.)
 - **Two scheduled routines**: Generate (weekly) and Publish (daily, two
   fires: 12:00 and 20:00).
 - **This repo, made public** — asset hosting. Graph API requires a publicly
