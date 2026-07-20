@@ -2,21 +2,25 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Automated pipeline that generates a week of Instagram content (original AI-generated, broad relatable/internet-culture humor, 1 post + 1 reel per day), lets the user approve the whole week in one sitting, then publishes autonomously via the official Meta Graph API with no further human interaction that week.
+**Goal:** Automated pipeline that generates a week of Instagram content (broad relatable/internet-culture humor, mixed across original AI-generated / meme-template / credited-free Reddit-repost sources, 1 post + 1 reel per day), lets the user approve the whole week in one sitting, then publishes autonomously via the official Meta Graph API with no further human interaction that week.
 
-**Architecture:** Two scheduled phases sharing a flat-file queue (`content/queue.json`). A weekly Generate routine creates 14 content items and a review Artifact page. A daily Publish routine (fires twice: image at 12:00, reel at 20:00) posts whatever is approved for that day via the Instagram Graph API. See `docs/superpowers/specs/2026-07-19-instagram-content-farm-design.md` for the approved design.
+**Architecture:** Two scheduled phases sharing a flat-file queue (`content/queue.json`). A weekly Generate routine creates 14 content items — each assigned a `source` (`original | template | repost`) from a fixed ~5/5/4 weekly rotation — and a review Artifact page. A daily Publish routine (fires twice: image at 12:00, reel at 20:00) posts whatever is approved for that day via the Instagram Graph API, identically regardless of source. See `docs/superpowers/specs/2026-07-19-instagram-content-farm-design.md` for the approved design.
 
-**Tech Stack:** Python 3.11+, `requests`, `anthropic` SDK, system `ffmpeg` binary, `pytest`, git/GitHub (public repo, raw-URL asset hosting), Claude Code scheduled routines, Artifact state capability.
+**Tech Stack:** Python 3.11+, `requests`, `anthropic` SDK, system `ffmpeg` binary, `pytest`, git/GitHub (public repo, raw-URL asset hosting), Reddit API (`client_credentials` OAuth), Imgflip public template API, Claude Code scheduled routines, Artifact state capability.
 
 ## Global Constraints
 
 - Official Meta Graph API only — no unofficial/private IG API libraries, no browser automation (spec: "Hard Constraint: Official API Only").
-- Image generation via Pollinations.ai (free, no key) — no paid image-gen API.
-- Reel audio must be royalty-free (Pixabay Audio / YouTube Audio Library or equivalent) — never pulled from Instagram's in-app audio library (unreachable via API anyway).
-- Secrets (`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, GitHub push credentials, `ANTHROPIC_API_KEY`) are environment variables only — never hardcoded, never committed. `.gitignore` already excludes `.env*`.
-- `content/queue.json` is the single source of truth for what gets published; nothing auto-posts without `status == "approved"` on the correct `scheduled_date`.
+- `original` images via Pollinations.ai (free, no key). `template` blanks via Imgflip's public `get_memes` endpoint (free, no key). `repost` content via Reddit's official free API — no paid content-sourcing API for any source.
+- Reel audio (for `original`/`template` sources) must be royalty-free (Pixabay Audio / YouTube Audio Library or equivalent) — never pulled from Instagram's in-app audio library (unreachable via API anyway). `repost` reels use the Reddit video's own audio (merged from DASH streams), not the royalty-free track.
+- Every one of the 14 weekly slots (7 posts + 7 reels) has a `source` of `original`, `template`, or `repost`, assigned from the fixed rotation `SOURCE_PLAN = ["original","template","repost","original","template","repost","original","template","repost","original","template","repost","original","template"]` (5 original / 5 template / 4 repost) — exact list, do not rebalance without updating this plan.
+- Reddit sourcing: subreddits exactly `["memes", "funny", "wholesomememes", "AdviceAnimals", "mildlyinteresting"]`, `MIN_UPVOTES = 500`, listing timeframe `"week"`, hard NSFW filter (`over_18 == false`), dedupe against `content/reddit_seen.json`.
+- Reposted content is never credited to the original poster or subreddit — explicit user decision, recorded with its risk tradeoff in the spec's "Repost Legal Posture" section. Do not add attribution back in.
+- If a `repost` slot has no qualifying post available, it falls back to `original` for that slot rather than failing the week's batch — same resilience pattern as every other producer failure in this pipeline.
+- Secrets (`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, GitHub push credentials, `ANTHROPIC_API_KEY`) are environment variables only — never hardcoded, never committed. `.gitignore` already excludes `.env*`.
+- `content/queue.json` is the single source of truth for what gets published; nothing auto-posts without `status == "approved"` on the correct `scheduled_date`. `publish.py` treats all three sources identically — it only ever reads `asset_url` and `caption`.
 - A `pending` item at its scheduled publish time is skipped and logged, never force-posted, never re-prompted.
-- No test may hit a live external API (Pollinations, Anthropic, Graph API) or perform a real `git push` — all external calls are injected via a `session`/`runner`/`client` parameter and replaced with fakes in tests.
+- No test may hit a live external API (Pollinations, Imgflip, Reddit, Anthropic, Graph API) or perform a real `git push`/`ffmpeg` binary invocation — all external calls are injected via a `session`/`runner`/`client` parameter and replaced with fakes in tests.
 
 ---
 
@@ -27,10 +31,11 @@
 - Create: `pipeline/__init__.py`
 - Create: `content/queue.json`
 - Create: `content/assets/.gitkeep`
+- Create: `content/reddit_seen.json`
 - Create: `.env.example`
 
 **Interfaces:**
-- Produces: `pipeline` package importable as `pipeline.*` from repo root; `content/queue.json` seeded as `[]`.
+- Produces: `pipeline` package importable as `pipeline.*` from repo root; `content/queue.json` and `content/reddit_seen.json` seeded as `[]`.
 
 - [ ] **Step 1: Create the package and data directories**
 
@@ -53,9 +58,15 @@ anthropic>=0.40
 pytest>=8.0
 ```
 
-- [ ] **Step 4: Seed the empty queue**
+- [ ] **Step 4: Seed the empty queue and the Reddit dedupe list**
 
 Write `content/queue.json`:
+
+```json
+[]
+```
+
+Write `content/reddit_seen.json`:
 
 ```json
 []
@@ -76,6 +87,9 @@ IG_BUSINESS_ID=
 ANTHROPIC_API_KEY=
 GITHUB_REPO_OWNER=
 GITHUB_REPO_NAME=
+REDDIT_CLIENT_ID=
+REDDIT_CLIENT_SECRET=
+REDDIT_USER_AGENT=
 ```
 
 - [ ] **Step 7: Install dependencies and verify pytest collects cleanly**
@@ -86,7 +100,7 @@ Expected: `no tests ran` (0 collected, exit code 0 — some pytest versions repo
 - [ ] **Step 8: Commit**
 
 ```bash
-git add requirements.txt pipeline/__init__.py content/queue.json content/assets/.gitkeep .env.example
+git add requirements.txt pipeline/__init__.py content/queue.json content/reddit_seen.json content/assets/.gitkeep .env.example
 git commit -m "chore: scaffold pipeline package and content directories"
 ```
 
@@ -104,7 +118,7 @@ git commit -m "chore: scaffold pipeline package and content directories"
   - `validate_item(item: dict) -> None`
   - `load_queue(path: Path) -> list[dict]`
   - `save_queue(path: Path, items: list[dict]) -> None`
-  - `new_item(*, type_: str, scheduled_date: str, asset_url: str, caption: str, hashtags: list[str]) -> dict`
+  - `new_item(*, type_: str, source: str, scheduled_date: str, asset_url: str, caption: str, hashtags: list[str]) -> dict`
   - `append_item(path: Path, item: dict) -> None`
   - `get_item_for_date(items: list[dict], scheduled_date: str, type_: str, status: str | None = None) -> dict | None`
   - `update_status(path: Path, item_id: str, new_status: str, posted_at: str | None = None) -> None`
@@ -121,12 +135,13 @@ from pipeline import queue_store
 
 def test_new_item_has_pending_status_and_uuid_id():
     item = queue_store.new_item(
-        type_="post", scheduled_date="2026-07-20",
+        type_="post", source="original", scheduled_date="2026-07-20",
         asset_url="https://example.com/a.jpg",
         caption="caption", hashtags=["a", "b"],
     )
     assert item["status"] == "pending"
     assert item["type"] == "post"
+    assert item["source"] == "original"
     assert item["scheduled_date"] == "2026-07-20"
     assert item["posted_at"] is None
     assert item["id"]
@@ -134,7 +149,7 @@ def test_new_item_has_pending_status_and_uuid_id():
 
 def test_validate_item_rejects_missing_field():
     item = queue_store.new_item(
-        type_="post", scheduled_date="2026-07-20",
+        type_="post", source="original", scheduled_date="2026-07-20",
         asset_url="u", caption="c", hashtags=[],
     )
     del item["caption"]
@@ -144,10 +159,20 @@ def test_validate_item_rejects_missing_field():
 
 def test_validate_item_rejects_bad_type():
     item = queue_store.new_item(
-        type_="post", scheduled_date="2026-07-20",
+        type_="post", source="original", scheduled_date="2026-07-20",
         asset_url="u", caption="c", hashtags=[],
     )
     item["type"] = "story"
+    with pytest.raises(queue_store.QueueValidationError):
+        queue_store.validate_item(item)
+
+
+def test_validate_item_rejects_bad_source():
+    item = queue_store.new_item(
+        type_="post", source="original", scheduled_date="2026-07-20",
+        asset_url="u", caption="c", hashtags=[],
+    )
+    item["source"] = "stolen"
     with pytest.raises(queue_store.QueueValidationError):
         queue_store.validate_item(item)
 
@@ -160,7 +185,7 @@ def test_load_queue_returns_empty_list_when_file_missing(tmp_path):
 def test_append_and_load_roundtrip(tmp_path):
     path = tmp_path / "queue.json"
     item = queue_store.new_item(
-        type_="reel", scheduled_date="2026-07-21",
+        type_="reel", source="repost", scheduled_date="2026-07-21",
         asset_url="u", caption="c", hashtags=["x"],
     )
     queue_store.append_item(path, item)
@@ -168,13 +193,14 @@ def test_append_and_load_roundtrip(tmp_path):
     loaded = queue_store.load_queue(path)
     assert len(loaded) == 1
     assert loaded[0]["id"] == item["id"]
+    assert loaded[0]["source"] == "repost"
 
 
 def test_get_item_for_date_filters_by_type_date_and_status():
     items = [
-        queue_store.new_item(type_="post", scheduled_date="2026-07-20",
+        queue_store.new_item(type_="post", source="original", scheduled_date="2026-07-20",
                               asset_url="u1", caption="c", hashtags=[]),
-        queue_store.new_item(type_="reel", scheduled_date="2026-07-20",
+        queue_store.new_item(type_="reel", source="template", scheduled_date="2026-07-20",
                               asset_url="u2", caption="c", hashtags=[]),
     ]
     items[0]["status"] = "approved"
@@ -189,7 +215,7 @@ def test_get_item_for_date_filters_by_type_date_and_status():
 def test_update_status_updates_existing_item_and_persists(tmp_path):
     path = tmp_path / "queue.json"
     item = queue_store.new_item(
-        type_="post", scheduled_date="2026-07-20",
+        type_="post", source="original", scheduled_date="2026-07-20",
         asset_url="u", caption="c", hashtags=[],
     )
     queue_store.append_item(path, item)
@@ -222,9 +248,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 VALID_TYPES = {"post", "reel"}
+VALID_SOURCES = {"original", "template", "repost"}
 VALID_STATUSES = {"pending", "approved", "rejected", "posted", "failed"}
 REQUIRED_FIELDS = {
-    "id", "type", "scheduled_date", "asset_url", "caption",
+    "id", "type", "source", "scheduled_date", "asset_url", "caption",
     "hashtags", "status", "created_at", "posted_at",
 }
 
@@ -239,6 +266,8 @@ def validate_item(item: dict) -> None:
         raise QueueValidationError(f"missing fields: {sorted(missing)}")
     if item["type"] not in VALID_TYPES:
         raise QueueValidationError(f"invalid type: {item['type']!r}")
+    if item["source"] not in VALID_SOURCES:
+        raise QueueValidationError(f"invalid source: {item['source']!r}")
     if item["status"] not in VALID_STATUSES:
         raise QueueValidationError(f"invalid status: {item['status']!r}")
 
@@ -259,11 +288,12 @@ def save_queue(path: Path, items: list[dict]) -> None:
     path.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
 
-def new_item(*, type_: str, scheduled_date: str, asset_url: str,
+def new_item(*, type_: str, source: str, scheduled_date: str, asset_url: str,
              caption: str, hashtags: list[str]) -> dict:
     item = {
         "id": str(uuid.uuid4()),
         "type": type_,
+        "source": source,
         "scheduled_date": scheduled_date,
         "asset_url": asset_url,
         "caption": caption,
@@ -309,7 +339,7 @@ def update_status(path: Path, item_id: str, new_status: str,
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_queue_store.py -v`
-Expected: PASS (8 passed)
+Expected: PASS (9 passed)
 
 - [ ] **Step 5: Commit**
 
@@ -461,7 +491,7 @@ git commit -m "feat: add Pollinations.ai image_gen client with 429 backoff"
 **Interfaces:**
 - Produces: `ReelBuildError(RuntimeError)`, `build_ffmpeg_command(image_paths: list[Path], audio_path: Path, text: str, out_path: Path, *, duration_seconds: int = 8, hook_seconds: int = 3) -> list[str]`, `build_reel(image_paths: list[Path], audio_path: Path, text: str, out_path: Path, *, duration_seconds: int = 8, hook_seconds: int = 3, runner=subprocess.run) -> Path`
 
-Reels quick-cut across `image_paths` (a "setup" shot and a "punchline" shot per the content strategy) and overlay `text` only during `[0, hook_seconds]` — the algorithm decides whether to distribute a Reel based on the first 1-3 seconds, so the hook must land immediately rather than fading in over the whole clip.
+Used by the `original` source (2 AI shots: setup + punchline) and the `template` source (same rendered template image passed twice). Not used by `repost` — a repost video is used directly as the reel asset. Text is overlaid only during `[0, hook_seconds]` — the algorithm decides whether to distribute a Reel based on the first 1-3 seconds, so the hook must land immediately rather than fading in over the whole clip.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -626,14 +656,16 @@ git commit -m "feat: add ffmpeg-based reel_builder module"
 
 ---
 
-### Task 5: Caption/hashtag generator
+### Task 5: Caption, hashtag, and meme-text generator
 
 **Files:**
 - Create: `pipeline/captions.py`
 - Test: `tests/test_captions.py`
 
 **Interfaces:**
-- Produces: `CaptionGenError(RuntimeError)`, `generate_caption(concept: str, *, client=None, model: str = "claude-sonnet-5") -> dict` returning `{"caption": str, "hashtags": list[str]}`
+- Produces: `CaptionGenError(RuntimeError)`, `generate_caption(concept: str, *, client=None, model: str = "claude-sonnet-5") -> dict` returning `{"caption": str, "hashtags": list[str]}`; `generate_meme_text(concept: str, *, client=None, model: str = "claude-sonnet-5") -> dict` returning `{"top": str, "bottom": str}`
+
+`generate_caption` is used by every source (the IG caption below the post). `generate_meme_text` is used only by the `template` source (the text baked onto the meme image itself). For `repost`, the caller passes `generate_caption` a concept string built from the Reddit post's own title (polished for shareability, meaning preserved) rather than a `THEMES` entry — no code change needed here, just how Task 9 invokes it.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -670,11 +702,11 @@ class FakeClient:
 
 
 def test_generate_caption_parses_valid_json():
-    client = FakeClient('{"caption": "lol", "hashtags": ["cyber", "meme"]}')
+    client = FakeClient('{"caption": "lol", "hashtags": ["relatable", "meme"]}')
 
-    result = captions.generate_caption("a red team meme", client=client)
+    result = captions.generate_caption("a relatable moment", client=client)
 
-    assert result == {"caption": "lol", "hashtags": ["cyber", "meme"]}
+    assert result == {"caption": "lol", "hashtags": ["relatable", "meme"]}
     assert client.messages.last_kwargs["model"] == "claude-sonnet-5"
 
 
@@ -682,14 +714,29 @@ def test_generate_caption_raises_on_invalid_json():
     client = FakeClient("not json")
 
     with pytest.raises(captions.CaptionGenError):
-        captions.generate_caption("a red team meme", client=client)
+        captions.generate_caption("a relatable moment", client=client)
 
 
 def test_generate_caption_raises_on_missing_keys():
     client = FakeClient('{"caption": "lol"}')
 
     with pytest.raises(captions.CaptionGenError):
-        captions.generate_caption("a red team meme", client=client)
+        captions.generate_caption("a relatable moment", client=client)
+
+
+def test_generate_meme_text_parses_valid_json():
+    client = FakeClient('{"top": "when the alarm goes off", "bottom": "and it is monday"}')
+
+    result = captions.generate_meme_text("monday dread", client=client)
+
+    assert result == {"top": "when the alarm goes off", "bottom": "and it is monday"}
+
+
+def test_generate_meme_text_raises_on_missing_keys():
+    client = FakeClient('{"top": "only top"}')
+
+    with pytest.raises(captions.CaptionGenError):
+        captions.generate_meme_text("monday dread", client=client)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -717,17 +764,25 @@ Respond with ONLY valid JSON: {{"caption": "...", "hashtags": ["...", ...]}}
 Caption should be short (1-2 sentences), punchy, no hashtags inside it.
 Provide 5-10 relevant hashtags without the # symbol."""
 
+MEME_TEXT_PROMPT = """Write top and bottom text for a meme image about this concept.
+Concept: {concept}
+
+Respond with ONLY valid JSON: {{"top": "...", "bottom": "..."}}
+Keep each line short (under 8 words), classic meme format (setup on top,
+punchline on bottom)."""
+
 
 class CaptionGenError(RuntimeError):
     pass
 
 
-def generate_caption(concept: str, *, client=None, model: str = "claude-sonnet-5") -> dict:
+def _generate_json(prompt: str, *, client=None, model: str, max_tokens: int,
+                    required_keys: set[str]) -> dict:
     client = client or Anthropic()
     message = client.messages.create(
         model=model,
-        max_tokens=300,
-        messages=[{"role": "user", "content": CAPTION_PROMPT.format(concept=concept)}],
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
     )
     raw = message.content[0].text
     try:
@@ -735,22 +790,39 @@ def generate_caption(concept: str, *, client=None, model: str = "claude-sonnet-5
     except json.JSONDecodeError as exc:
         raise CaptionGenError(f"model did not return valid JSON: {raw!r}") from exc
 
-    if "caption" not in data or "hashtags" not in data:
+    missing = required_keys - data.keys()
+    if missing:
         raise CaptionGenError(f"missing keys in model response: {data!r}")
 
+    return data
+
+
+def generate_caption(concept: str, *, client=None, model: str = "claude-sonnet-5") -> dict:
+    data = _generate_json(
+        CAPTION_PROMPT.format(concept=concept), client=client, model=model,
+        max_tokens=300, required_keys={"caption", "hashtags"},
+    )
     return {"caption": data["caption"], "hashtags": list(data["hashtags"])}
+
+
+def generate_meme_text(concept: str, *, client=None, model: str = "claude-sonnet-5") -> dict:
+    data = _generate_json(
+        MEME_TEXT_PROMPT.format(concept=concept), client=client, model=model,
+        max_tokens=150, required_keys={"top", "bottom"},
+    )
+    return {"top": data["top"], "bottom": data["bottom"]}
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_captions.py -v`
-Expected: PASS (3 passed)
+Expected: PASS (5 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add pipeline/captions.py tests/test_captions.py
-git commit -m "feat: add Claude-backed caption/hashtag generator"
+git commit -m "feat: add Claude-backed caption, hashtag, and meme-text generator"
 ```
 
 ---
@@ -883,17 +955,552 @@ git commit -m "feat: add git-push-based public asset hosting helper"
 
 ---
 
-### Task 7: Weekly generate orchestrator
+### Task 7: Template source (Imgflip)
+
+**Files:**
+- Create: `pipeline/template_source.py`
+- Test: `tests/test_template_source.py`
+
+**Interfaces:**
+- Produces: `TemplateSourceError(RuntimeError)`, `list_templates(*, session=None) -> list[dict]`, `pick_template(templates: list[dict], day_index: int) -> dict`, `download_template_image(template: dict, out_path: Path, *, session=None) -> Path`, `render_caption_on_template(template_image: Path, top_text: str, bottom_text: str, out_path: Path, *, runner=subprocess.run) -> Path`
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_template_source.py`:
+
+```python
+from pathlib import Path
+import pytest
+from pipeline import template_source
+
+
+class FakeResponse:
+    def __init__(self, status_code, body=None, content=b""):
+        self.status_code = status_code
+        self._body = body
+        self.content = content
+
+    def json(self):
+        return self._body
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def get(self, url, timeout=None):
+        return self.responses.pop(0)
+
+
+def test_list_templates_returns_meme_list_on_success():
+    body = {"success": True, "data": {"memes": [{"id": "1", "url": "http://x/1.jpg"}]}}
+    session = FakeSession([FakeResponse(200, body=body)])
+
+    result = template_source.list_templates(session=session)
+
+    assert result == [{"id": "1", "url": "http://x/1.jpg"}]
+
+
+def test_list_templates_raises_on_failure():
+    session = FakeSession([FakeResponse(200, body={"success": False})])
+
+    with pytest.raises(template_source.TemplateSourceError):
+        template_source.list_templates(session=session)
+
+
+def test_pick_template_cycles_by_day_index():
+    templates = [{"id": "1"}, {"id": "2"}]
+
+    assert template_source.pick_template(templates, 0)["id"] == "1"
+    assert template_source.pick_template(templates, 1)["id"] == "2"
+    assert template_source.pick_template(templates, 2)["id"] == "1"
+
+
+def test_pick_template_raises_on_empty_list():
+    with pytest.raises(template_source.TemplateSourceError):
+        template_source.pick_template([], 0)
+
+
+def test_download_template_image_writes_file(tmp_path):
+    session = FakeSession([FakeResponse(200, content=b"blank-template-bytes")])
+    out_path = tmp_path / "blank.jpg"
+
+    result = template_source.download_template_image(
+        {"id": "1", "url": "http://x/1.jpg"}, out_path, session=session,
+    )
+
+    assert result == out_path
+    assert out_path.read_bytes() == b"blank-template-bytes"
+
+
+def test_download_template_image_raises_on_failure(tmp_path):
+    session = FakeSession([FakeResponse(404)])
+
+    with pytest.raises(template_source.TemplateSourceError):
+        template_source.download_template_image(
+            {"id": "1", "url": "http://x/1.jpg"}, tmp_path / "blank.jpg", session=session,
+        )
+
+
+class FakeCompletedProcess:
+    def __init__(self, returncode, stderr=""):
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def test_render_caption_on_template_returns_out_path_on_success(tmp_path):
+    calls = []
+
+    def fake_runner(command, capture_output, text):
+        calls.append(command)
+        return FakeCompletedProcess(returncode=0)
+
+    out_path = tmp_path / "out.jpg"
+    result = template_source.render_caption_on_template(
+        tmp_path / "blank.jpg", "top text", "bottom text", out_path, runner=fake_runner,
+    )
+
+    assert result == out_path
+    assert calls[0][0] == "ffmpeg"
+
+
+def test_render_caption_on_template_raises_on_nonzero_returncode(tmp_path):
+    def fake_runner(command, capture_output, text):
+        return FakeCompletedProcess(returncode=1, stderr="render boom")
+
+    with pytest.raises(template_source.TemplateSourceError, match="render boom"):
+        template_source.render_caption_on_template(
+            tmp_path / "blank.jpg", "top", "bottom", tmp_path / "out.jpg", runner=fake_runner,
+        )
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pytest tests/test_template_source.py -v`
+Expected: FAIL with `ModuleNotFoundError`
+
+- [ ] **Step 3: Implement `pipeline/template_source.py`**
+
+```python
+import subprocess
+from pathlib import Path
+
+import requests
+
+IMGFLIP_TEMPLATES_URL = "https://api.imgflip.com/get_memes"
+
+
+class TemplateSourceError(RuntimeError):
+    pass
+
+
+def list_templates(*, session=None) -> list[dict]:
+    session = session or requests.Session()
+    response = session.get(IMGFLIP_TEMPLATES_URL, timeout=30)
+    body = response.json()
+    if response.status_code != 200 or not body.get("success"):
+        raise TemplateSourceError(f"imgflip template list failed: {body}")
+    return body["data"]["memes"]
+
+
+def pick_template(templates: list[dict], day_index: int) -> dict:
+    if not templates:
+        raise TemplateSourceError("no templates available")
+    return templates[day_index % len(templates)]
+
+
+def download_template_image(template: dict, out_path: Path, *, session=None) -> Path:
+    session = session or requests.Session()
+    response = session.get(template["url"], timeout=60)
+    if response.status_code != 200:
+        raise TemplateSourceError(
+            f"failed to download template {template['id']}: status {response.status_code}"
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(response.content)
+    return out_path
+
+
+def render_caption_on_template(template_image: Path, top_text: str, bottom_text: str,
+                                out_path: Path, *, runner=subprocess.run) -> Path:
+    def _escape(text: str) -> str:
+        return text.replace(":", r"\:").replace("'", r"\'").upper()
+
+    top_draw = (
+        f"drawtext=text='{_escape(top_text)}':fontcolor=white:fontsize=48:"
+        f"borderw=3:bordercolor=black:x=(w-text_w)/2:y=20"
+    )
+    bottom_draw = (
+        f"drawtext=text='{_escape(bottom_text)}':fontcolor=white:fontsize=48:"
+        f"borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-th-20"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg", "-y", "-i", str(template_image),
+        "-vf", f"{top_draw},{bottom_draw}",
+        "-frames:v", "1",
+        str(out_path),
+    ]
+    result = runner(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise TemplateSourceError(f"template render failed: {result.stderr}")
+    return out_path
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `pytest tests/test_template_source.py -v`
+Expected: PASS (7 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add pipeline/template_source.py tests/test_template_source.py
+git commit -m "feat: add Imgflip-backed template_source module"
+```
+
+---
+
+### Task 8: Reddit source (repost sourcing)
+
+**Files:**
+- Create: `pipeline/reddit_source.py`
+- Test: `tests/test_reddit_source.py`
+
+**Interfaces:**
+- Produces: `RedditSourceError(RuntimeError)`, `get_access_token(client_id: str, client_secret: str, user_agent: str, *, session=None) -> str`, `fetch_top_posts(subreddit: str, access_token: str, user_agent: str, *, limit: int = 25, timeframe: str = "week", session=None) -> list[dict]`, `pick_post(posts: list[dict], *, media_kind: str, min_upvotes: int, seen_ids: set[str]) -> dict | None`, `download_image_post(post: dict, out_path: Path, *, session=None) -> Path`, `download_video_post(post: dict, out_path: Path, *, session=None, runner=subprocess.run) -> Path`, `load_seen_ids(path: Path) -> set[str]`, `mark_seen(path: Path, post_id: str) -> None`
+
+`media_kind` is `"image"` or `"video"` — Task 9 passes `"image"` for post slots and `"video"` for reel slots.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_reddit_source.py`:
+
+```python
+from pathlib import Path
+import pytest
+from pipeline import reddit_source
+
+
+class FakeResponse:
+    def __init__(self, status_code, body=None, content=b""):
+        self.status_code = status_code
+        self._body = body
+        self.content = content
+
+    def json(self):
+        return self._body
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append(("POST", url, kwargs))
+        return self.responses.pop(0)
+
+    def get(self, url, **kwargs):
+        self.calls.append(("GET", url, kwargs))
+        return self.responses.pop(0)
+
+
+def test_get_access_token_returns_token_on_success():
+    session = FakeSession([FakeResponse(200, body={"access_token": "tok123"})])
+
+    token = reddit_source.get_access_token("id", "secret", "ua/1.0", session=session)
+
+    assert token == "tok123"
+
+
+def test_get_access_token_raises_on_failure():
+    session = FakeSession([FakeResponse(401, body={"error": "bad"})])
+
+    with pytest.raises(reddit_source.RedditSourceError):
+        reddit_source.get_access_token("id", "secret", "ua/1.0", session=session)
+
+
+def test_fetch_top_posts_returns_children_data():
+    body = {"data": {"children": [{"data": {"id": "a"}}, {"data": {"id": "b"}}]}}
+    session = FakeSession([FakeResponse(200, body=body)])
+
+    posts = reddit_source.fetch_top_posts("memes", "tok", "ua/1.0", session=session)
+
+    assert posts == [{"id": "a"}, {"id": "b"}]
+
+
+def test_fetch_top_posts_raises_on_error_status():
+    session = FakeSession([FakeResponse(403, body={"error": "forbidden"})])
+
+    with pytest.raises(reddit_source.RedditSourceError):
+        reddit_source.fetch_top_posts("memes", "tok", "ua/1.0", session=session)
+
+
+def _post(id_, *, ups=1000, over_18=False, post_hint="image", is_video=False):
+    return {"id": id_, "ups": ups, "over_18": over_18, "post_hint": post_hint, "is_video": is_video}
+
+
+def test_pick_post_skips_seen_ids():
+    posts = [_post("a"), _post("b")]
+    result = reddit_source.pick_post(posts, media_kind="image", min_upvotes=0, seen_ids={"a"})
+    assert result["id"] == "b"
+
+
+def test_pick_post_skips_nsfw():
+    posts = [_post("a", over_18=True), _post("b")]
+    result = reddit_source.pick_post(posts, media_kind="image", min_upvotes=0, seen_ids=set())
+    assert result["id"] == "b"
+
+
+def test_pick_post_skips_below_min_upvotes():
+    posts = [_post("a", ups=10), _post("b", ups=1000)]
+    result = reddit_source.pick_post(posts, media_kind="image", min_upvotes=500, seen_ids=set())
+    assert result["id"] == "b"
+
+
+def test_pick_post_filters_by_media_kind_video():
+    posts = [
+        _post("a", post_hint="image", is_video=False),
+        _post("b", post_hint="hosted:video", is_video=True),
+    ]
+    result = reddit_source.pick_post(posts, media_kind="video", min_upvotes=0, seen_ids=set())
+    assert result["id"] == "b"
+
+
+def test_pick_post_returns_none_when_no_match():
+    posts = [_post("a", ups=0)]
+    result = reddit_source.pick_post(posts, media_kind="image", min_upvotes=500, seen_ids=set())
+    assert result is None
+
+
+def test_download_image_post_writes_file(tmp_path):
+    session = FakeSession([FakeResponse(200, content=b"image-bytes")])
+    out_path = tmp_path / "post.jpg"
+
+    result = reddit_source.download_image_post(
+        {"id": "a", "url": "http://x/a.jpg"}, out_path, session=session,
+    )
+
+    assert result == out_path
+    assert out_path.read_bytes() == b"image-bytes"
+
+
+class FakeCompletedProcess:
+    def __init__(self, returncode, stderr=""):
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def test_download_video_post_merges_audio_when_present(tmp_path):
+    session = FakeSession([
+        FakeResponse(200, content=b"video-bytes"),
+        FakeResponse(200, content=b"audio-bytes"),
+    ])
+    calls = []
+
+    def fake_runner(command, capture_output, text):
+        calls.append(command)
+        Path(command[-1]).write_bytes(b"merged")
+        return FakeCompletedProcess(returncode=0)
+
+    post = {
+        "id": "a",
+        "media": {"reddit_video": {"fallback_url": "http://v.redd.it/a/DASH_720.mp4"}},
+    }
+    out_path = tmp_path / "post.mp4"
+
+    result = reddit_source.download_video_post(post, out_path, session=session, runner=fake_runner)
+
+    assert result == out_path
+    assert len(calls) == 1
+    assert calls[0][0] == "ffmpeg"
+
+
+def test_download_video_post_falls_back_to_video_only_when_no_audio(tmp_path):
+    session = FakeSession([
+        FakeResponse(200, content=b"video-bytes"),
+        FakeResponse(404),
+    ])
+    post = {
+        "id": "a",
+        "media": {"reddit_video": {"fallback_url": "http://v.redd.it/a/DASH_720.mp4"}},
+    }
+    out_path = tmp_path / "post.mp4"
+
+    result = reddit_source.download_video_post(post, out_path, session=session)
+
+    assert result == out_path
+    assert out_path.read_bytes() == b"video-bytes"
+
+
+def test_load_seen_ids_empty_when_missing(tmp_path):
+    assert reddit_source.load_seen_ids(tmp_path / "seen.json") == set()
+
+
+def test_mark_seen_persists_and_dedupes(tmp_path):
+    path = tmp_path / "seen.json"
+
+    reddit_source.mark_seen(path, "a")
+    reddit_source.mark_seen(path, "b")
+    reddit_source.mark_seen(path, "a")
+
+    assert reddit_source.load_seen_ids(path) == {"a", "b"}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pytest tests/test_reddit_source.py -v`
+Expected: FAIL with `ModuleNotFoundError`
+
+- [ ] **Step 3: Implement `pipeline/reddit_source.py`**
+
+```python
+import json
+import subprocess
+from pathlib import Path
+
+import requests
+
+REDDIT_AUTH_URL = "https://www.reddit.com/api/v1/access_token"
+REDDIT_API_BASE = "https://oauth.reddit.com"
+
+
+class RedditSourceError(RuntimeError):
+    pass
+
+
+def get_access_token(client_id: str, client_secret: str, user_agent: str,
+                      *, session=None) -> str:
+    session = session or requests.Session()
+    response = session.post(
+        REDDIT_AUTH_URL,
+        auth=(client_id, client_secret),
+        data={"grant_type": "client_credentials"},
+        headers={"User-Agent": user_agent},
+        timeout=30,
+    )
+    body = response.json()
+    if response.status_code != 200 or "access_token" not in body:
+        raise RedditSourceError(f"reddit auth failed: {body}")
+    return body["access_token"]
+
+
+def fetch_top_posts(subreddit: str, access_token: str, user_agent: str, *,
+                     limit: int = 25, timeframe: str = "week", session=None) -> list[dict]:
+    session = session or requests.Session()
+    response = session.get(
+        f"{REDDIT_API_BASE}/r/{subreddit}/top",
+        params={"limit": limit, "t": timeframe},
+        headers={"Authorization": f"bearer {access_token}", "User-Agent": user_agent},
+        timeout=30,
+    )
+    body = response.json()
+    if response.status_code != 200:
+        raise RedditSourceError(f"reddit listing fetch failed for r/{subreddit}: {body}")
+    return [child["data"] for child in body["data"]["children"]]
+
+
+def pick_post(posts: list[dict], *, media_kind: str, min_upvotes: int,
+              seen_ids: set[str]) -> dict | None:
+    for post in posts:
+        if post["id"] in seen_ids:
+            continue
+        if post.get("over_18"):
+            continue
+        if post.get("ups", 0) < min_upvotes:
+            continue
+        if media_kind == "image" and post.get("post_hint") == "image":
+            return post
+        if media_kind == "video" and post.get("is_video"):
+            return post
+    return None
+
+
+def download_image_post(post: dict, out_path: Path, *, session=None) -> Path:
+    session = session or requests.Session()
+    response = session.get(post["url"], timeout=60)
+    if response.status_code != 200:
+        raise RedditSourceError(
+            f"failed to download image for post {post['id']}: status {response.status_code}"
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(response.content)
+    return out_path
+
+
+def download_video_post(post: dict, out_path: Path, *, session=None,
+                         runner=subprocess.run) -> Path:
+    session = session or requests.Session()
+    video_url = post["media"]["reddit_video"]["fallback_url"]
+    video_response = session.get(video_url, timeout=60)
+    if video_response.status_code != 200:
+        raise RedditSourceError(
+            f"failed to download video for post {post['id']}: "
+            f"status {video_response.status_code}"
+        )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    video_temp = out_path.with_suffix(".video.mp4")
+    video_temp.write_bytes(video_response.content)
+
+    audio_url = video_url.rsplit("/", 1)[0] + "/DASH_audio.mp4"
+    audio_response = session.get(audio_url, timeout=60)
+    if audio_response.status_code != 200:
+        video_temp.replace(out_path)
+        return out_path
+
+    audio_temp = out_path.with_suffix(".audio.mp4")
+    audio_temp.write_bytes(audio_response.content)
+
+    result = runner(
+        ["ffmpeg", "-y", "-i", str(video_temp), "-i", str(audio_temp),
+         "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", str(out_path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RedditSourceError(f"ffmpeg merge failed for post {post['id']}: {result.stderr}")
+    return out_path
+
+
+def load_seen_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return set(json.loads(path.read_text(encoding="utf-8")))
+
+
+def mark_seen(path: Path, post_id: str) -> None:
+    seen = load_seen_ids(path)
+    seen.add(post_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted(seen), indent=2), encoding="utf-8")
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `pytest tests/test_reddit_source.py -v`
+Expected: PASS (15 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add pipeline/reddit_source.py tests/test_reddit_source.py
+git commit -m "feat: add Reddit-backed repost sourcing module"
+```
+
+---
+
+### Task 9: Weekly generate orchestrator
 
 **Files:**
 - Create: `pipeline/generate.py`
 - Test: `tests/test_generate.py`
 
 **Interfaces:**
-- Consumes: `queue_store.new_item`, `queue_store.append_item` (Task 2); `image_gen.generate_image` (Task 3); `reel_builder.build_reel(image_paths: list[Path], audio_path, text, out_path, **kw)` (Task 4); `captions.generate_caption` (Task 5); `asset_host.publish_asset` (Task 6)
-- Produces: `THEMES: list[str]`, `pick_theme(day_index: int) -> str`, `generate_week(*, start_date: date, queue_path: Path, work_dir: Path, repo_root: Path, repo_owner: str, repo_name: str, audio_path: Path) -> list[dict]`
+- Consumes: `queue_store.new_item`, `queue_store.append_item` (Task 2); `image_gen.generate_image` (Task 3); `reel_builder.build_reel(image_paths, audio_path, text, out_path, **kw)` (Task 4); `captions.generate_caption`, `captions.generate_meme_text` (Task 5); `asset_host.publish_asset` (Task 6); `template_source.list_templates`, `template_source.pick_template`, `template_source.download_template_image`, `template_source.render_caption_on_template` (Task 7); `reddit_source.fetch_top_posts`, `reddit_source.load_seen_ids`, `reddit_source.pick_post`, `reddit_source.download_image_post`, `reddit_source.download_video_post`, `reddit_source.mark_seen` (Task 8)
+- Produces: `THEMES: list[str]`, `SOURCE_PLAN: list[str]`, `SUBREDDITS: list[str]`, `MIN_UPVOTES: int`, `pick_theme(day_index: int) -> str`, `source_for_slot(day_index: int, slot_type: str) -> str`, `generate_week(*, start_date: date, queue_path: Path, work_dir: Path, repo_root: Path, repo_owner: str, repo_name: str, audio_path: Path, reddit_access_token: str, reddit_user_agent: str, seen_path: Path) -> list[dict]`
 
-Themes are broad, general relatable-humor concepts (daily life, work, phone/group-chat moments) — not a subject-matter niche like cybersecurity — per the design doc's Content Model. Each reel gets two images generated from the same theme (a "setup" shot and a "punchline" shot) for `reel_builder.build_reel`'s quick-cut.
+Themes are broad, general relatable-humor concepts (daily life, work, phone/group-chat moments) — not a subject-matter niche. `SOURCE_PLAN` is the exact 14-slot rotation from Global Constraints. Each weekly slot's `source` picks which producer builds its asset; a `repost` slot that finds no qualifying Reddit post falls back to `original` for that slot (Global Constraints).
 
 - [ ] **Step 1: Write failing tests**
 
@@ -911,41 +1518,96 @@ def test_pick_theme_cycles_through_themes():
     assert generate.pick_theme(len(generate.THEMES)) == generate.THEMES[0]
 
 
-def test_generate_week_creates_14_items_with_correct_dates_and_types(tmp_path, monkeypatch):
-    queue_path = tmp_path / "queue.json"
-    work_dir = tmp_path / "work"
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    audio_path = tmp_path / "audio.mp3"
-    audio_path.write_bytes(b"a")
+def test_source_for_slot_matches_source_plan():
+    assert generate.source_for_slot(0, "post") == "original"
+    assert generate.source_for_slot(0, "reel") == "template"
+    assert generate.source_for_slot(1, "post") == "repost"
 
+
+def _patch_all_producers(monkeypatch, *, repost_post):
     monkeypatch.setattr(generate.image_gen, "generate_image",
                          lambda prompt, out_path, **kw: out_path)
     monkeypatch.setattr(generate.reel_builder, "build_reel",
                          lambda image_paths, audio_path, text, out_path, **kw: out_path)
     monkeypatch.setattr(generate.captions, "generate_caption",
                          lambda concept, **kw: {"caption": "cap", "hashtags": ["h"]})
-    monkeypatch.setattr(generate.asset_host, "publish_asset",
-                         lambda local_path, repo_root, relative_dest, **kw:
-                             f"https://raw.githubusercontent.com/me/repo/master/{relative_dest}")
-
-    created = generate.generate_week(
-        start_date=date(2026, 7, 20),
-        queue_path=queue_path, work_dir=work_dir, repo_root=repo_root,
-        repo_owner="me", repo_name="repo", audio_path=audio_path,
+    monkeypatch.setattr(generate.captions, "generate_meme_text",
+                         lambda concept, **kw: {"top": "T", "bottom": "B"})
+    monkeypatch.setattr(generate.template_source, "list_templates",
+                         lambda **kw: [{"id": "1", "url": "http://x/blank.jpg"}])
+    monkeypatch.setattr(generate.template_source, "pick_template",
+                         lambda templates, day_index: templates[0])
+    monkeypatch.setattr(generate.template_source, "download_template_image",
+                         lambda template, out_path, **kw: out_path)
+    monkeypatch.setattr(generate.template_source, "render_caption_on_template",
+                         lambda blank_path, top, bottom, out_path, **kw: out_path)
+    monkeypatch.setattr(generate.reddit_source, "fetch_top_posts",
+                         lambda subreddit, token, ua, **kw: [{"id": "abc", "title": "funny thing"}])
+    monkeypatch.setattr(generate.reddit_source, "load_seen_ids", lambda path: set())
+    monkeypatch.setattr(
+        generate.reddit_source, "pick_post",
+        lambda posts, *, media_kind, min_upvotes, seen_ids: (posts[0] if repost_post else None),
+    )
+    monkeypatch.setattr(generate.reddit_source, "download_image_post",
+                         lambda post, out_path, **kw: out_path)
+    monkeypatch.setattr(generate.reddit_source, "download_video_post",
+                         lambda post, out_path, **kw: out_path)
+    monkeypatch.setattr(generate.reddit_source, "mark_seen", lambda path, post_id: None)
+    monkeypatch.setattr(
+        generate.asset_host, "publish_asset",
+        lambda local_path, repo_root, relative_dest, **kw:
+            f"https://raw.githubusercontent.com/me/repo/master/{relative_dest}",
     )
 
+
+def _run_generate_week(tmp_path):
+    return generate.generate_week(
+        start_date=date(2026, 7, 20),
+        queue_path=tmp_path / "queue.json",
+        work_dir=tmp_path / "work",
+        repo_root=tmp_path / "repo",
+        repo_owner="me", repo_name="repo",
+        audio_path=tmp_path / "audio.mp3",
+        reddit_access_token="token", reddit_user_agent="ua/1.0",
+        seen_path=tmp_path / "reddit_seen.json",
+    )
+
+
+def test_generate_week_creates_14_items_with_correct_sources_and_dates(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "audio.mp3").write_bytes(b"a")
+    _patch_all_producers(monkeypatch, repost_post=True)
+
+    created = _run_generate_week(tmp_path)
+
     assert len(created) == 14
-    loaded = queue_store.load_queue(queue_path)
+    loaded = queue_store.load_queue(tmp_path / "queue.json")
     assert len(loaded) == 14
 
+    ordered = sorted(loaded, key=lambda i: (i["scheduled_date"], i["type"] == "reel"))
+    assert [i["source"] for i in ordered] == generate.SOURCE_PLAN
+
     post_dates = sorted(i["scheduled_date"] for i in loaded if i["type"] == "post")
-    reel_dates = sorted(i["scheduled_date"] for i in loaded if i["type"] == "reel")
-    assert post_dates == reel_dates == [
+    assert post_dates == [
         "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23",
         "2026-07-24", "2026-07-25", "2026-07-26",
     ]
     assert all(i["status"] == "pending" for i in loaded)
+
+
+def test_generate_week_falls_back_to_original_when_repost_unavailable(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "audio.mp3").write_bytes(b"a")
+    _patch_all_producers(monkeypatch, repost_post=False)
+
+    _run_generate_week(tmp_path)
+
+    loaded = queue_store.load_queue(tmp_path / "queue.json")
+    assert all(item["source"] != "repost" for item in loaded)
+    expected_original_count = (
+        generate.SOURCE_PLAN.count("original") + generate.SOURCE_PLAN.count("repost")
+    )
+    assert sum(1 for i in loaded if i["source"] == "original") == expected_original_count
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -959,7 +1621,15 @@ Expected: FAIL with `ModuleNotFoundError`
 from datetime import date, timedelta
 from pathlib import Path
 
-from pipeline import asset_host, captions, image_gen, queue_store, reel_builder
+from pipeline import (
+    asset_host,
+    captions,
+    image_gen,
+    queue_store,
+    reddit_source,
+    reel_builder,
+    template_source,
+)
 
 THEMES = [
     "Monday morning alarm going off, exaggerated dread reaction",
@@ -973,57 +1643,147 @@ THEMES = [
 
 REEL_SHOT_VARIANTS = ("setup shot", "punchline reaction shot")
 
+SUBREDDITS = ["memes", "funny", "wholesomememes", "AdviceAnimals", "mildlyinteresting"]
+MIN_UPVOTES = 500
+
+# 14 slots = 7 days x (post, reel). 5 original / 5 template / 4 repost.
+SOURCE_PLAN = [
+    "original", "template", "repost", "original", "template",
+    "repost", "original", "template", "repost", "original",
+    "template", "repost", "original", "template",
+]
+
 
 def pick_theme(day_index: int) -> str:
     return THEMES[day_index % len(THEMES)]
 
 
+def source_for_slot(day_index: int, slot_type: str) -> str:
+    slot_index = day_index * 2 + (0 if slot_type == "post" else 1)
+    return SOURCE_PLAN[slot_index % len(SOURCE_PLAN)]
+
+
+def _produce_original(*, slot_type: str, theme: str, work_dir: Path,
+                       day_label: str, audio_path: Path) -> tuple[Path, dict]:
+    caption = captions.generate_caption(theme)
+
+    if slot_type == "post":
+        image_path = work_dir / f"{day_label}-post-original.jpg"
+        image_gen.generate_image(theme, image_path)
+        return image_path, caption
+
+    reel_image_paths = []
+    for shot_index, variant in enumerate(REEL_SHOT_VARIANTS):
+        reel_image = work_dir / f"{day_label}-reel-original-{shot_index}.jpg"
+        image_gen.generate_image(f"{theme}, {variant}", reel_image)
+        reel_image_paths.append(reel_image)
+
+    reel_video = work_dir / f"{day_label}-reel-original.mp4"
+    reel_builder.build_reel(reel_image_paths, audio_path, caption["caption"], reel_video)
+    return reel_video, caption
+
+
+def _produce_template(*, slot_type: str, theme: str, work_dir: Path, day_label: str,
+                       audio_path: Path, templates: list[dict], day_index: int) -> tuple[Path, dict]:
+    caption = captions.generate_caption(theme)
+    meme_text = captions.generate_meme_text(theme)
+    chosen_template = template_source.pick_template(templates, day_index)
+
+    blank_path = work_dir / f"{day_label}-{slot_type}-template-blank.jpg"
+    template_source.download_template_image(chosen_template, blank_path)
+
+    rendered_path = work_dir / f"{day_label}-{slot_type}-template.jpg"
+    template_source.render_caption_on_template(
+        blank_path, meme_text["top"], meme_text["bottom"], rendered_path,
+    )
+
+    if slot_type == "post":
+        return rendered_path, caption
+
+    reel_video = work_dir / f"{day_label}-reel-template.mp4"
+    reel_builder.build_reel([rendered_path, rendered_path], audio_path,
+                             caption["caption"], reel_video)
+    return reel_video, caption
+
+
+def _produce_repost(*, slot_type: str, work_dir: Path, day_label: str, subreddit: str,
+                     access_token: str, user_agent: str, seen_path: Path) -> tuple[Path, dict] | None:
+    posts = reddit_source.fetch_top_posts(subreddit, access_token, user_agent)
+    seen_ids = reddit_source.load_seen_ids(seen_path)
+    media_kind = "image" if slot_type == "post" else "video"
+    post = reddit_source.pick_post(posts, media_kind=media_kind,
+                                    min_upvotes=MIN_UPVOTES, seen_ids=seen_ids)
+    if post is None:
+        return None
+
+    caption = captions.generate_caption(
+        "polish this into a punchy shareable caption without changing its "
+        f"meaning: {post['title']}"
+    )
+
+    if slot_type == "post":
+        asset_path = work_dir / f"{day_label}-post-repost.jpg"
+        reddit_source.download_image_post(post, asset_path)
+    else:
+        asset_path = work_dir / f"{day_label}-reel-repost.mp4"
+        reddit_source.download_video_post(post, asset_path)
+
+    reddit_source.mark_seen(seen_path, post["id"])
+    return asset_path, caption
+
+
 def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
                    repo_root: Path, repo_owner: str, repo_name: str,
-                   audio_path: Path) -> list[dict]:
+                   audio_path: Path, reddit_access_token: str,
+                   reddit_user_agent: str, seen_path: Path) -> list[dict]:
     work_dir.mkdir(parents=True, exist_ok=True)
     created = []
+    templates = template_source.list_templates()
 
     for offset in range(7):
         day = start_date + timedelta(days=offset)
+        day_label = day.isoformat()
         theme = pick_theme(offset)
+        subreddit = SUBREDDITS[offset % len(SUBREDDITS)]
 
-        post_image = work_dir / f"{day.isoformat()}-post.jpg"
-        image_gen.generate_image(theme, post_image)
-        post_caption = captions.generate_caption(theme)
-        post_relative = f"content/assets/{post_image.name}"
-        post_url = asset_host.publish_asset(
-            post_image, repo_root, post_relative,
-            repo_owner=repo_owner, repo_name=repo_name,
-        )
-        post_item = queue_store.new_item(
-            type_="post", scheduled_date=day.isoformat(), asset_url=post_url,
-            caption=post_caption["caption"], hashtags=post_caption["hashtags"],
-        )
-        queue_store.append_item(queue_path, post_item)
-        created.append(post_item)
+        for slot_type in ("post", "reel"):
+            source = source_for_slot(offset, slot_type)
+            result = None
 
-        reel_image_paths = []
-        for shot_index, variant in enumerate(REEL_SHOT_VARIANTS):
-            reel_image = work_dir / f"{day.isoformat()}-reel-{shot_index}.jpg"
-            image_gen.generate_image(f"{theme}, {variant}", reel_image)
-            reel_image_paths.append(reel_image)
+            if source == "template":
+                result = _produce_template(
+                    slot_type=slot_type, theme=theme, work_dir=work_dir,
+                    day_label=day_label, audio_path=audio_path,
+                    templates=templates, day_index=offset,
+                )
+            elif source == "repost":
+                result = _produce_repost(
+                    slot_type=slot_type, work_dir=work_dir, day_label=day_label,
+                    subreddit=subreddit, access_token=reddit_access_token,
+                    user_agent=reddit_user_agent, seen_path=seen_path,
+                )
+                if result is None:
+                    source = "original"
 
-        reel_caption = captions.generate_caption(theme + ", short video reel")
-        reel_video = work_dir / f"{day.isoformat()}-reel.mp4"
-        reel_builder.build_reel(reel_image_paths, audio_path,
-                                 reel_caption["caption"], reel_video)
-        reel_relative = f"content/assets/{reel_video.name}"
-        reel_url = asset_host.publish_asset(
-            reel_video, repo_root, reel_relative,
-            repo_owner=repo_owner, repo_name=repo_name,
-        )
-        reel_item = queue_store.new_item(
-            type_="reel", scheduled_date=day.isoformat(), asset_url=reel_url,
-            caption=reel_caption["caption"], hashtags=reel_caption["hashtags"],
-        )
-        queue_store.append_item(queue_path, reel_item)
-        created.append(reel_item)
+            if source == "original":
+                result = _produce_original(
+                    slot_type=slot_type, theme=theme, work_dir=work_dir,
+                    day_label=day_label, audio_path=audio_path,
+                )
+
+            asset_local_path, caption = result
+            relative_dest = f"content/assets/{asset_local_path.name}"
+            asset_url = asset_host.publish_asset(
+                asset_local_path, repo_root, relative_dest,
+                repo_owner=repo_owner, repo_name=repo_name,
+            )
+            item = queue_store.new_item(
+                type_=slot_type, source=source, scheduled_date=day_label,
+                asset_url=asset_url, caption=caption["caption"],
+                hashtags=caption["hashtags"],
+            )
+            queue_store.append_item(queue_path, item)
+            created.append(item)
 
     return created
 ```
@@ -1031,18 +1791,18 @@ def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_generate.py -v`
-Expected: PASS (2 passed)
+Expected: PASS (4 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add pipeline/generate.py tests/test_generate.py
-git commit -m "feat: add weekly generate orchestrator"
+git commit -m "feat: add weekly generate orchestrator with source dispatch"
 ```
 
 ---
 
-### Task 8: Graph API client
+### Task 10: Graph API client
 
 **Files:**
 - Create: `pipeline/graph_api.py`
@@ -1270,15 +2030,17 @@ git commit -m "feat: add Instagram Graph API client"
 
 ---
 
-### Task 9: Daily publish orchestrator
+### Task 11: Daily publish orchestrator
 
 **Files:**
 - Create: `pipeline/publish.py`
 - Test: `tests/test_publish.py`
 
 **Interfaces:**
-- Consumes: `queue_store.load_queue`, `queue_store.get_item_for_date`, `queue_store.update_status` (Task 2); `graph_api.create_image_container`, `graph_api.create_reel_container`, `graph_api.wait_for_container_ready`, `graph_api.publish_container` (Task 8)
+- Consumes: `queue_store.load_queue`, `queue_store.get_item_for_date`, `queue_store.update_status`, `queue_store.new_item` (Task 2); `graph_api.create_image_container`, `graph_api.create_reel_container`, `graph_api.wait_for_container_ready`, `graph_api.publish_container` (Task 10)
 - Produces: `PublishSkipped(Exception)`, `publish_today(*, item_type: str, queue_path: Path, ig_business_id: str, access_token: str, today: date | None = None, dry_run: bool = False) -> dict`, CLI `main()`
+
+`publish_today` is source-agnostic — it never reads or branches on `source`; both `create_image_container`/`create_reel_container` calls use whatever `asset_url` is on the approved queue item, regardless of whether that asset came from Pollinations, Imgflip, or Reddit.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1292,7 +2054,7 @@ from pipeline import publish, queue_store, graph_api
 
 def _seed_approved_item(queue_path, item_type, scheduled_date="2026-07-20"):
     item = queue_store.new_item(
-        type_=item_type, scheduled_date=scheduled_date,
+        type_=item_type, source="original", scheduled_date=scheduled_date,
         asset_url="https://example.com/a.jpg", caption="cap", hashtags=["h"],
     )
     item["status"] = "approved"
@@ -1474,13 +2236,13 @@ git commit -m "feat: add daily publish orchestrator with dry-run support"
 
 ---
 
-### Task 10: Meta Developer App + long-lived access token
+### Task 12: Meta Developer App + long-lived access token
 
-**Files:** None (external setup + verification using Task 8's `verify_credentials`)
+**Files:** None (external setup + verification using Task 10's `verify_credentials`)
 
 **Interfaces:**
-- Consumes: `graph_api.verify_credentials` (Task 8)
-- Produces: working `IG_ACCESS_TOKEN` and `IG_BUSINESS_ID` values for use by Tasks 9, 12, 13
+- Consumes: `graph_api.verify_credentials` (Task 10)
+- Produces: working `IG_ACCESS_TOKEN` and `IG_BUSINESS_ID` values for use by Tasks 11, 15, 16
 
 - [ ] **Step 1: Create the Meta App**
 
@@ -1512,9 +2274,9 @@ Expected: JSON body with `instagram_business_account.id` — this is `IG_BUSINES
 
 - [ ] **Step 6: Store credentials as environment variables (not in any file that gets committed)**
 
-Set `IG_ACCESS_TOKEN` and `IG_BUSINESS_ID` locally for smoke-testing now; Task 12 configures the same values in the scheduled routine's secret store.
+Set `IG_ACCESS_TOKEN` and `IG_BUSINESS_ID` locally for smoke-testing now; Task 15 configures the same values in the scheduled routine's secret store.
 
-- [ ] **Step 7: Verify with Task 8's client**
+- [ ] **Step 7: Verify with Task 10's client**
 
 Run: `python -m pipeline.graph_api`
 Expected: `OK - connected as @<your account username>`
@@ -1525,14 +2287,49 @@ Long-lived tokens expire ~60 days. There is no code task for renewal in this pla
 
 ---
 
-### Task 11: Review Artifact page
+### Task 13: Reddit API app setup
+
+**Files:** None (external setup + verification using Task 8's `get_access_token`/`fetch_top_posts`)
+
+**Interfaces:**
+- Consumes: `reddit_source.get_access_token`, `reddit_source.fetch_top_posts` (Task 8)
+- Produces: working `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT` values for use by Tasks 9, 15, 16
+
+- [ ] **Step 1: Create a Reddit script app**
+
+Go to `reddit.com/prefs/apps` (logged into any Reddit account — a personal account is fine, this is read-only) → "create another app..." → type **script** → name it (e.g. the IG account's handle) → redirect URI can be `http://localhost` (unused for `client_credentials`).
+
+- [ ] **Step 2: Collect the credentials**
+
+The string under the app name is `REDDIT_CLIENT_ID`; "secret" is `REDDIT_CLIENT_SECRET`. Set `REDDIT_USER_AGENT` to a descriptive string per Reddit's API rules, e.g. `instagram-content-farm/1.0 by u/<your-reddit-username>`.
+
+- [ ] **Step 3: Verify with Task 8's client**
+
+```bash
+python -c "
+import os
+from pipeline import reddit_source
+token = reddit_source.get_access_token(
+    os.environ['REDDIT_CLIENT_ID'], os.environ['REDDIT_CLIENT_SECRET'],
+    os.environ['REDDIT_USER_AGENT'],
+)
+posts = reddit_source.fetch_top_posts('memes', token, os.environ['REDDIT_USER_AGENT'], limit=5)
+print(f'OK - fetched {len(posts)} posts, first title: {posts[0][\"title\"]!r}')
+"
+```
+
+Expected: `OK - fetched 5 posts, first title: '...'`
+
+---
+
+### Task 14: Review Artifact page
 
 **Files:**
 - Create: `review_page.html` (source file passed to the Artifact tool)
 
 **Interfaces:**
 - Consumes: the week's `content/queue.json` (fetched client-side via its public raw-URL, since the repo is public per the design doc)
-- Produces: a published Artifact URL where the user approves/rejects the week's 14 items; approve/reject decisions must end up reflected in `content/queue.json`'s `status` field before Task 12's Publish routine reads it
+- Produces: a published Artifact URL where the user approves/rejects the week's 14 items; approve/reject decisions must end up reflected in `content/queue.json`'s `status` field before Task 15's Publish routine reads it
 
 - [ ] **Step 1: Load the `artifact-capabilities` skill**
 
@@ -1540,7 +2337,7 @@ This is required before writing any capability declaration or `window.claude.*` 
 
 - [ ] **Step 2: Write the static page structure**
 
-`review_page.html` fetches `https://raw.githubusercontent.com/<owner>/<repo>/master/content/queue.json`, groups the 14 items by `scheduled_date`, and renders each with: a thumbnail (`<img>` for `type=post`, `<video controls>` for `type=reel`) pointed at `asset_url`, the `caption`, the `hashtags` list, and Approve/Reject buttons. Style it plainly — this is a private single-user utility page, not a polished product.
+`review_page.html` fetches `https://raw.githubusercontent.com/<owner>/<repo>/master/content/queue.json`, groups the 14 items by `scheduled_date`, and renders each with: a thumbnail (`<img>` for `type=post`, `<video controls>` for `type=reel`) pointed at `asset_url`, the `caption`, the `hashtags` list, the item's `source` (small label — `original`/`template`/`repost`, useful context when reviewing), and Approve/Reject buttons. Style it plainly — this is a private single-user utility page, not a polished product.
 
 - [ ] **Step 3: Wire Approve/Reject to persisted state**
 
@@ -1552,16 +2349,16 @@ Use the Artifact tool with `file_path` set to `review_page.html`, an appropriate
 
 - [ ] **Step 5: Verify manually**
 
-Open the published URL. Approve one item and reject another. Confirm (using the loaded skill's guidance for reading state back) that both decisions are readable — this is what Task 12's approval-sync step will read.
+Open the published URL. Approve one item and reject another. Confirm (using the loaded skill's guidance for reading state back) that both decisions are readable — this is what Task 15's approval-sync step will read.
 
 ---
 
-### Task 12: Scheduled routines
+### Task 15: Scheduled routines
 
 **Files:** None (configuration via the `schedule` skill, not source files in this repo)
 
 **Interfaces:**
-- Consumes: `pipeline.generate.generate_week` (Task 7), `pipeline.publish.main` (Task 9), the review Artifact's persisted state (Task 11)
+- Consumes: `pipeline.generate.generate_week` (Task 9), `pipeline.publish.main` (Task 11), the review Artifact's persisted state (Task 14)
 
 - [ ] **Step 1: Load the `schedule` skill**
 
@@ -1569,11 +2366,11 @@ Use it to create the scheduled cloud agents below — do not hand-write cron con
 
 - [ ] **Step 2: Create the weekly Generate routine**
 
-Cron: weekly, Sunday 07:00. Prompt instructs the agent to: run `generate.generate_week(...)` for the coming Mon–Sun with this repo's `repo_owner`/`repo_name`, then (re)publish the Task 11 review Artifact for the new week's `content/queue.json`, then send the user a push notification that the week's batch is ready for review.
+Cron: weekly, Sunday 07:00. Prompt instructs the agent to: run `generate.generate_week(...)` for the coming Mon–Sun with this repo's `repo_owner`/`repo_name`, then (re)publish the Task 14 review Artifact for the new week's `content/queue.json`, then send the user a push notification that the week's batch is ready for review.
 
 - [ ] **Step 3: Create the daily Publish routine — image, 12:00**
 
-Cron: daily, 12:00. Prompt instructs the agent to: first sync approval decisions from the Task 11 Artifact's persisted state into `content/queue.json` (calling `queue_store.update_status` for any item whose stored decision differs from its current `status`), then run `python -m pipeline.publish --type post`.
+Cron: daily, 12:00. Prompt instructs the agent to: first sync approval decisions from the Task 14 Artifact's persisted state into `content/queue.json` (calling `queue_store.update_status` for any item whose stored decision differs from its current `status`), then run `python -m pipeline.publish --type post`.
 
 - [ ] **Step 4: Create the daily Publish routine — reel, 20:00**
 
@@ -1581,7 +2378,7 @@ Same as Step 3 but `python -m pipeline.publish --type reel`. The approval-sync o
 
 - [ ] **Step 5: Store secrets in the routines' secret configuration**
 
-`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `ANTHROPIC_API_KEY`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`, and git push credentials for the asset repo — per the loaded `schedule` skill's mechanism for routine secrets. Never in a committed file.
+`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `ANTHROPIC_API_KEY`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`, and git push credentials for the asset repo — per the loaded `schedule` skill's mechanism for routine secrets. Never in a committed file.
 
 - [ ] **Step 6: Verify routines are listed**
 
@@ -1589,7 +2386,7 @@ Use `schedule`'s list capability to confirm all three routines (1 weekly, 2 dail
 
 ---
 
-### Task 13: End-to-end dry-run and manual smoke test
+### Task 16: End-to-end dry-run and manual smoke test
 
 **Files:** None (verification only)
 
@@ -1597,22 +2394,30 @@ Use `schedule`'s list capability to confirm all three routines (1 weekly, 2 dail
 
 ```bash
 python -c "
+import os
 from datetime import date
 from pathlib import Path
-from pipeline import generate
+from pipeline import generate, reddit_source
+
+token = reddit_source.get_access_token(
+    os.environ['REDDIT_CLIENT_ID'], os.environ['REDDIT_CLIENT_SECRET'],
+    os.environ['REDDIT_USER_AGENT'],
+)
 generate.generate_week(
     start_date=date.today(), queue_path=Path('content/queue.json'),
     work_dir=Path('.work'), repo_root=Path('.'),
     repo_owner='<owner>', repo_name='<repo>', audio_path=Path('<royalty-free-audio.mp3>'),
+    reddit_access_token=token, reddit_user_agent=os.environ['REDDIT_USER_AGENT'],
+    seen_path=Path('content/reddit_seen.json'),
 )
 "
 ```
 
-Expected: 14 new entries in `content/queue.json`, 14 new files under `content/assets/`, all pushed to the public GitHub repo.
+Expected: 14 new entries in `content/queue.json` (verify with a quick read that all three `source` values appear at least once across the week), 14 new asset files under `content/assets/`, all pushed to the public GitHub repo.
 
 - [ ] **Step 2: Manually approve one post item**
 
-Open the Task 11 Artifact, approve today's `post` item, reject or ignore the rest.
+Open the Task 14 Artifact, approve today's `post` item, reject or ignore the rest. Confirm the approved item's `source` in the review UI matches what you expect (spot-check that `template` and `repost` items render correctly, not just `original`).
 
 - [ ] **Step 3: Dry-run publish**
 
@@ -1632,12 +2437,12 @@ Expected: item status becomes `posted` in `content/queue.json`, and the post is 
 
 - [ ] **Step 5: Confirm the full week runs unattended for the remainder of the current week**
 
-No further action — the two daily Publish routines should now post the remaining approved items on schedule. Check back in a few days that `content/queue.json` shows `posted` entries advancing day by day.
+No further action — the two daily Publish routines should now post the remaining approved items on schedule. Check back in a few days that `content/queue.json` shows `posted` entries advancing day by day, across all three sources.
 
 ---
 
 ## Self-Review Notes
 
-- **Spec coverage:** every design-doc section maps to a task — content model (Tasks 3–5), architecture/two-phase split (Tasks 7, 9, 12), asset hosting (Task 6), credentials (Task 10), review Artifact (Task 11), error handling (Tasks 8–9's `GraphAPIError` propagation + Global Constraints), testing (`--dry-run` in Task 9, smoke test in Task 13), setup scope (Task 10).
-- **Placeholder scan:** no TBD/TODO; Tasks 11 and 12 intentionally defer exact capability/cron syntax to their respective skills per those skills' own "load before writing" requirement — this is delegation, not an unresolved placeholder, and every other step in those tasks has concrete content.
-- **Type consistency:** checked `queue_store`, `image_gen`, `reel_builder`, `captions`, `asset_host`, `graph_api`, `generate`, and `publish` signatures across all "Consumes"/"Produces" blocks — names and parameters match where each module is used by a later task.
+- **Spec coverage:** every design-doc section maps to a task — content sourcing mix (Tasks 3, 5, 7, 8, 9), reel hook structure (Task 4), asset hosting (Task 6), Graph API + publish (Tasks 10-11), credentials (Tasks 12-13), review Artifact (Task 14), scheduling (Task 15), error handling / fallback-to-original (Task 9's `_produce_repost` + `generate_week` dispatch, Global Constraints), testing (`--dry-run` in Task 11, smoke test in Task 16), repost non-crediting (spec's "Repost Legal Posture", reflected in Task 9's caption generation using only the polished title, no attribution field anywhere in the schema).
+- **Placeholder scan:** no TBD/TODO; Tasks 14 and 15 intentionally defer exact capability/cron syntax to their respective skills per those skills' own "load before writing" requirement — this is delegation, not an unresolved placeholder, and every other step in those tasks has concrete content.
+- **Type consistency:** checked `queue_store`, `image_gen`, `reel_builder`, `captions`, `asset_host`, `template_source`, `reddit_source`, `graph_api`, `generate`, and `publish` signatures across all "Consumes"/"Produces" blocks — names and parameters match where each module is used by a later task. In particular, `queue_store.new_item` now requires `source` everywhere it's called (Tasks 2, 9, 11's test fixture), and `generate.generate_week`'s new `reddit_access_token`/`reddit_user_agent`/`seen_path` parameters are threaded through consistently in Tasks 9, 15, and 16.
