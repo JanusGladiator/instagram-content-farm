@@ -38,7 +38,14 @@ def publish_today(*, item_type: str, queue_path: Path, ig_business_id: str,
     graph_api.publish_container(ig_business_id, creation_id, access_token)
 
     posted_at = datetime.now(timezone.utc).isoformat()
-    queue_store.update_status(queue_path, item["id"], "posted", posted_at=posted_at)
+    try:
+        queue_store.update_status(queue_path, item["id"], "posted", posted_at=posted_at)
+    except Exception:
+        print(
+            f"CRITICAL: item id={item['id']} WAS published to Instagram but the local "
+            f"status update failed — manual verification required to avoid a duplicate post"
+        )
+        raise
     item["status"] = "posted"
     item["posted_at"] = posted_at
     return item
@@ -61,6 +68,9 @@ def main() -> None:
         )
     except PublishSkipped as exc:
         print(f"skip: {exc}")
+    except graph_api.GraphAPIError as exc:
+        print(f"ERROR: publish failed for --type={args.type} queue={args.queue}: {exc}")
+        raise
 
 
 if __name__ == "__main__":

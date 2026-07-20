@@ -1,3 +1,4 @@
+import sys
 from datetime import date
 import pytest
 from pipeline import publish, queue_store, graph_api
@@ -94,3 +95,48 @@ def test_publish_today_propagates_graph_error_and_leaves_status_approved(tmp_pat
 
     reloaded = queue_store.load_queue(queue_path)
     assert reloaded[0]["status"] == "approved"
+
+
+def test_publish_today_raises_and_logs_critical_when_status_update_fails_after_live_post(
+    tmp_path, monkeypatch, capsys
+):
+    queue_path = tmp_path / "queue.json"
+    item = _seed_approved_item(queue_path, "post")
+
+    monkeypatch.setattr(graph_api, "create_image_container", lambda *a, **k: "cid")
+    monkeypatch.setattr(graph_api, "publish_container", lambda *a, **k: "mid")
+
+    def raise_disk_full(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(publish.queue_store, "update_status", raise_disk_full)
+
+    with pytest.raises(OSError):
+        publish.publish_today(
+            item_type="post", queue_path=queue_path,
+            ig_business_id="ig1", access_token="token", today=date(2026, 7, 20),
+        )
+
+    out = capsys.readouterr().out
+    assert "CRITICAL" in out
+    assert item["id"] in out
+
+
+def test_main_logs_error_and_reraises_on_graph_api_error(tmp_path, monkeypatch, capsys):
+    queue_path = tmp_path / "queue.json"
+    _seed_approved_item(queue_path, "post", scheduled_date=date.today().isoformat())
+
+    def raise_error(*a, **k):
+        raise graph_api.GraphAPIError("token expired")
+
+    monkeypatch.setattr(graph_api, "create_image_container", raise_error)
+    monkeypatch.setenv("IG_BUSINESS_ID", "ig1")
+    monkeypatch.setenv("IG_ACCESS_TOKEN", "token")
+    monkeypatch.setattr(
+        sys, "argv", ["publish.py", "--type", "post", "--queue", str(queue_path)]
+    )
+
+    with pytest.raises(graph_api.GraphAPIError):
+        publish.main()
+
+    assert "ERROR" in capsys.readouterr().out
