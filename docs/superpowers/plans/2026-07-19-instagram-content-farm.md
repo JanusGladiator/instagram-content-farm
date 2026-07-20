@@ -2322,34 +2322,37 @@ Expected: `OK - fetched 5 posts, first title: '...'`
 
 ---
 
-### Task 14: Review Artifact page
+### Task 14: Review Artifact page — COMPLETE (built with a revised mechanism, see below)
 
 **Files:**
-- Create: `review_page.html` (source file passed to the Artifact tool)
+- Create: `review_page.html` (source file passed to the Artifact tool; not git-tracked — Artifact publishing is separate from this repo's file set)
+
+**What was actually built, and why it differs from the original plan:** the original Interfaces
+line below assumed an Artifact "persisted state" capability that a scheduled routine could read
+back automatically. Verified against the real runtime capability contract while building this
+task: no such capability exists (only `downloads` and `mcp` are available; no GitHub connector is
+connected in this environment for `mcp` to use). See the design doc's "Why not automatic approval
+sync" section. The page instead uses `localStorage` for in-browser persistence across reloads,
+plus a `downloads`-capability Export button that downloads a copy of `queue.json` with `status`
+fields patched from the user's approve/reject clicks. The user hands that exported file back in a
+live chat session; Claude commits it over `content/queue.json`. Task 15's routines were revised
+accordingly (no sync step).
 
 **Interfaces:**
-- Consumes: the week's `content/queue.json` (fetched client-side via its public raw-URL, since the repo is public per the design doc)
-- Produces: a published Artifact URL where the user approves/rejects the week's 14 items; approve/reject decisions must end up reflected in `content/queue.json`'s `status` field before Task 15's Publish routine reads it
+- Consumes: the week's `content/queue.json` (fetched client-side via its public raw-URL, once the
+  content repo exists — the `QUEUE_URL` constant near the top of `review_page.html`'s script needs
+  updating from its `OWNER_PLACEHOLDER/REPO_PLACEHOLDER` value to the real `repo_owner`/`repo_name`
+  once the GitHub repo is set up, then the artifact republished)
+- Produces: a published Artifact URL where the user approves/rejects the week's 14 items; an
+  Export button that downloads the patched `queue.json` for manual handoff
 
-- [ ] **Step 1: Load the `artifact-capabilities` skill**
-
-This is required before writing any capability declaration or `window.claude.*` runtime code — invoke it now via the Skill tool. Its current contract determines the exact API for shared/persisted state; do not hand-write that API from memory.
-
-- [ ] **Step 2: Write the static page structure**
-
-`review_page.html` fetches `https://raw.githubusercontent.com/<owner>/<repo>/master/content/queue.json`, groups the 14 items by `scheduled_date`, and renders each with: a thumbnail (`<img>` for `type=post`, `<video controls>` for `type=reel`) pointed at `asset_url`, the `caption`, the `hashtags` list, the item's `source` (small label — `original`/`template`/`repost`, useful context when reviewing), and Approve/Reject buttons. Style it plainly — this is a private single-user utility page, not a polished product.
-
-- [ ] **Step 3: Wire Approve/Reject to persisted state**
-
-Following the loaded `artifact-capabilities` skill's current guidance, wire each button to write that item's decision (`approved`/`rejected`) to the artifact's persisted state, keyed by item `id`. Do not guess at capability names or call signatures not confirmed by the skill.
-
-- [ ] **Step 4: Publish the artifact**
-
-Use the Artifact tool with `file_path` set to `review_page.html`, an appropriate `favicon`, a `description`, and the `capabilities` object the loaded skill specifies.
-
-- [ ] **Step 5: Verify manually**
-
-Open the published URL. Approve one item and reject another. Confirm (using the loaded skill's guidance for reading state back) that both decisions are readable — this is what Task 15's approval-sync step will read.
+Steps actually followed: loaded `artifact-capabilities` (mandatory before any capability code) and
+`artifact-design` (layout guidance); wrote the page (thumbnail/video preview, caption, hashtags,
+`source` label, grouped by `scheduled_date`, Approve/Reject/reset controls, summary counts, Export
+button, graceful empty/unreachable-queue state, light/dark theme support); declared only
+`{"downloads": true}` (no `mcp`, since no connector could be observed); published with `favicon`
+📋. See `.superpowers/sdd/task-14-report.md` for full detail including the capability-contract
+verification.
 
 ---
 
@@ -2358,7 +2361,9 @@ Open the published URL. Approve one item and reject another. Confirm (using the 
 **Files:** None (configuration via the `schedule` skill, not source files in this repo)
 
 **Interfaces:**
-- Consumes: `pipeline.generate.generate_week` (Task 9), `pipeline.publish.main` (Task 11), the review Artifact's persisted state (Task 14)
+- Consumes: `pipeline.generate.generate_week` (Task 9), `pipeline.publish.main` (Task 11)
+
+No approval-sync step exists (see Task 14) — by the time the Publish routines run, `content/queue.json` already has final `approved`/`rejected` statuses baked in, because that file *is* the one the user exported and Claude committed. If the user hasn't finished reviewing yet when a Publish run fires, items are still `status=pending` and are correctly skipped (existing behavior in `publish.py`, no special-casing needed here).
 
 - [ ] **Step 1: Load the `schedule` skill**
 
@@ -2366,15 +2371,15 @@ Use it to create the scheduled cloud agents below — do not hand-write cron con
 
 - [ ] **Step 2: Create the weekly Generate routine**
 
-Cron: weekly, Sunday 07:00. Prompt instructs the agent to: run `generate.generate_week(...)` for the coming Mon–Sun with this repo's `repo_owner`/`repo_name`, then (re)publish the Task 14 review Artifact for the new week's `content/queue.json`, then send the user a push notification that the week's batch is ready for review.
+Cron: weekly, Sunday 07:00. Prompt instructs the agent to: run `generate.generate_week(...)` for the coming Mon–Sun with this repo's `repo_owner`/`repo_name`, then (re)publish the Task 14 review Artifact for the new week's `content/queue.json` (redeploy `review_page.html` to the same Artifact URL — same `file_path` keeps the URL stable), then send the user a push notification that the week's batch is ready for review.
 
 - [ ] **Step 3: Create the daily Publish routine — image, 12:00**
 
-Cron: daily, 12:00. Prompt instructs the agent to: first sync approval decisions from the Task 14 Artifact's persisted state into `content/queue.json` (calling `queue_store.update_status` for any item whose stored decision differs from its current `status`), then run `python -m pipeline.publish --type post`.
+Cron: daily, 12:00. Prompt instructs the agent to run `python -m pipeline.publish --type post`. Nothing else — no sync step.
 
 - [ ] **Step 4: Create the daily Publish routine — reel, 20:00**
 
-Same as Step 3 but `python -m pipeline.publish --type reel`. The approval-sync only needs to run once per day in practice, but repeating it in both routines is simpler and harmless (idempotent — re-writing the same status is a no-op).
+Same as Step 3 but `python -m pipeline.publish --type reel`.
 
 - [ ] **Step 5: Store secrets in the routines' secret configuration**
 
@@ -2383,6 +2388,10 @@ Same as Step 3 but `python -m pipeline.publish --type reel`. The approval-sync o
 - [ ] **Step 6: Verify routines are listed**
 
 Use `schedule`'s list capability to confirm all three routines (1 weekly, 2 daily) exist with the correct cron expressions and next-run times.
+
+- [ ] **Step 7: Document the weekly handoff step**
+
+This isn't a one-time build step but a standing operational instruction: whenever the user says they've reviewed the week's batch and provides the exported `queue.json` (pasted, attached, or described), commit it over `content/queue.json` in the repo before the next Publish fire. Note this doesn't need new code — it's something to remember when picking this project back up in a future session (worth a quick project memory note).
 
 ---
 
@@ -2415,9 +2424,9 @@ generate.generate_week(
 
 Expected: 14 new entries in `content/queue.json` (verify with a quick read that all three `source` values appear at least once across the week), 14 new asset files under `content/assets/`, all pushed to the public GitHub repo.
 
-- [ ] **Step 2: Manually approve one post item**
+- [ ] **Step 2: Manually approve one post item and hand off the export**
 
-Open the Task 14 Artifact, approve today's `post` item, reject or ignore the rest. Confirm the approved item's `source` in the review UI matches what you expect (spot-check that `template` and `repost` items render correctly, not just `original`).
+Open the Task 14 Artifact (after its `QUEUE_URL` has been updated to the real repo and republished), approve today's `post` item, reject or ignore the rest. Confirm the approved item's `source` in the review UI matches what you expect (spot-check that `template` and `repost` items render correctly, not just `original`). Click Export, then commit the downloaded file over `content/queue.json` in the repo (this replaces the manual-sync step the original design assumed would happen automatically — see Task 14/15).
 
 - [ ] **Step 3: Dry-run publish**
 
@@ -2425,7 +2434,7 @@ Open the Task 14 Artifact, approve today's `post` item, reject or ignore the res
 python -m pipeline.publish --type post --dry-run
 ```
 
-Expected: `[dry-run] would publish post id=... asset=... caption=...` — confirms the sync + selection logic picks the right item without calling the live Graph API.
+Expected: `[dry-run] would publish post id=... asset=... caption=...` — confirms the selection logic picks the right item without calling the live Graph API.
 
 - [ ] **Step 4: One real manual post**
 
