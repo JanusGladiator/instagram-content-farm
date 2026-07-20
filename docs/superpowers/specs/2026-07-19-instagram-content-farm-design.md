@@ -68,6 +68,21 @@ project (user has not done this yet) — see "Setup" below.
 
 ### Reddit Sourcing
 
+**Status as of 2026-07-20: unavailable, not pursued further.** Reddit closed
+self-serve registration for new apps on its legacy Data API (the one this
+design targets) in late 2025; new app registration is now explicitly scoped
+to "valid moderation use case" per Reddit's own developer page, which this
+project doesn't qualify as. No viable free/legitimate alternative source
+was found (the old scraper-style free meme APIs, e.g. `meme-api.com`, are
+dead; the remaining free "meme APIs" are template-generators — the same
+category `template` sourcing already covers, not real reposts). The design
+below is kept as-is (it's fully implemented and tested) because `generate_week`
+degrades gracefully — every `repost`-planned slot silently becomes
+`original` when Reddit auth fails, at zero ongoing cost — so there is
+nothing to remove; `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` are left as
+placeholder values in the routine's secret store. Revisit only if Reddit's
+policy changes.
+
 - Subreddits: `memes`, `funny`, `wholesomememes`, `AdviceAnimals`,
   `mildlyinteresting` — general relatable humor, matching the broad-niche
   content model above.
