@@ -1479,7 +1479,7 @@ def mark_seen(path: Path, post_id: str) -> None:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_reddit_source.py -v`
-Expected: PASS (15 passed)
+Expected: PASS (14 passed)
 
 - [ ] **Step 5: Commit**
 
