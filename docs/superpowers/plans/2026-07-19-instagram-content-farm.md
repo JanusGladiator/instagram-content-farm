@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Automated pipeline that generates a week of Instagram content (memes + AI-generated tech/cyber images, 1 post + 1 reel per day), lets the user approve the whole week in one sitting, then publishes autonomously via the official Meta Graph API with no further human interaction that week.
+**Goal:** Automated pipeline that generates a week of Instagram content (original AI-generated, broad relatable/internet-culture humor, 1 post + 1 reel per day), lets the user approve the whole week in one sitting, then publishes autonomously via the official Meta Graph API with no further human interaction that week.
 
 **Architecture:** Two scheduled phases sharing a flat-file queue (`content/queue.json`). A weekly Generate routine creates 14 content items and a review Artifact page. A daily Publish routine (fires twice: image at 12:00, reel at 20:00) posts whatever is approved for that day via the Instagram Graph API. See `docs/superpowers/specs/2026-07-19-instagram-content-farm-design.md` for the approved design.
 
@@ -459,7 +459,9 @@ git commit -m "feat: add Pollinations.ai image_gen client with 429 backoff"
 - Test: `tests/test_reel_builder.py`
 
 **Interfaces:**
-- Produces: `ReelBuildError(RuntimeError)`, `build_ffmpeg_command(image_path: Path, audio_path: Path, text: str, out_path: Path, *, duration_seconds: int = 8) -> list[str]`, `build_reel(image_path: Path, audio_path: Path, text: str, out_path: Path, *, duration_seconds: int = 8, runner=subprocess.run) -> Path`
+- Produces: `ReelBuildError(RuntimeError)`, `build_ffmpeg_command(image_paths: list[Path], audio_path: Path, text: str, out_path: Path, *, duration_seconds: int = 8, hook_seconds: int = 3) -> list[str]`, `build_reel(image_paths: list[Path], audio_path: Path, text: str, out_path: Path, *, duration_seconds: int = 8, hook_seconds: int = 3, runner=subprocess.run) -> Path`
+
+Reels quick-cut across `image_paths` (a "setup" shot and a "punchline" shot per the content strategy) and overlay `text` only during `[0, hook_seconds]` — the algorithm decides whether to distribute a Reel based on the first 1-3 seconds, so the hook must land immediately rather than fading in over the whole clip.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -471,23 +473,41 @@ import pytest
 from pipeline import reel_builder
 
 
-def test_build_ffmpeg_command_includes_inputs_and_output():
+def test_build_ffmpeg_command_includes_all_image_inputs_and_output():
     command = reel_builder.build_ffmpeg_command(
-        Path("img.jpg"), Path("audio.mp3"), "hello world", Path("out.mp4"),
+        [Path("setup.jpg"), Path("punchline.jpg")], Path("audio.mp3"),
+        "hello world", Path("out.mp4"),
     )
     assert command[0] == "ffmpeg"
-    assert "img.jpg" in command
+    assert "setup.jpg" in command
+    assert "punchline.jpg" in command
     assert "audio.mp3" in command
     assert command[-1] == "out.mp4"
 
 
 def test_build_ffmpeg_command_escapes_special_chars_in_text():
     command = reel_builder.build_ffmpeg_command(
-        Path("img.jpg"), Path("audio.mp3"), "it's 5:00", Path("out.mp4"),
+        [Path("img.jpg")], Path("audio.mp3"), "it's 5:00", Path("out.mp4"),
     )
-    drawtext_arg = command[command.index("-vf") + 1]
-    assert r"\:" in drawtext_arg
-    assert r"\'" in drawtext_arg
+    filter_arg = command[command.index("-filter_complex") + 1]
+    assert r"\:" in filter_arg
+    assert r"\'" in filter_arg
+
+
+def test_build_ffmpeg_command_restricts_text_to_hook_window():
+    command = reel_builder.build_ffmpeg_command(
+        [Path("img.jpg")], Path("audio.mp3"), "hook", Path("out.mp4"),
+        hook_seconds=3,
+    )
+    filter_arg = command[command.index("-filter_complex") + 1]
+    assert "enable='between(t,0,3)'" in filter_arg
+
+
+def test_build_ffmpeg_command_raises_on_empty_image_list():
+    with pytest.raises(ValueError):
+        reel_builder.build_ffmpeg_command(
+            [], Path("audio.mp3"), "hook", Path("out.mp4"),
+        )
 
 
 class FakeCompletedProcess:
@@ -505,7 +525,8 @@ def test_build_reel_returns_out_path_on_success(tmp_path):
 
     out_path = tmp_path / "out.mp4"
     result = reel_builder.build_reel(
-        tmp_path / "img.jpg", tmp_path / "audio.mp3", "caption", out_path,
+        [tmp_path / "setup.jpg", tmp_path / "punchline.jpg"],
+        tmp_path / "audio.mp3", "caption", out_path,
         runner=fake_runner,
     )
 
@@ -520,7 +541,7 @@ def test_build_reel_raises_on_nonzero_returncode(tmp_path):
 
     with pytest.raises(reel_builder.ReelBuildError, match="boom"):
         reel_builder.build_reel(
-            tmp_path / "img.jpg", tmp_path / "audio.mp3", "caption",
+            [tmp_path / "img.jpg"], tmp_path / "audio.mp3", "caption",
             tmp_path / "out.mp4", runner=fake_runner,
         )
 ```
@@ -541,30 +562,50 @@ class ReelBuildError(RuntimeError):
     pass
 
 
-def build_ffmpeg_command(image_path: Path, audio_path: Path, text: str,
-                          out_path: Path, *, duration_seconds: int = 8) -> list[str]:
+def build_ffmpeg_command(image_paths: list[Path], audio_path: Path, text: str,
+                          out_path: Path, *, duration_seconds: int = 8,
+                          hook_seconds: int = 3) -> list[str]:
+    if not image_paths:
+        raise ValueError("image_paths must contain at least one image")
+
+    per_image_seconds = duration_seconds / len(image_paths)
     escaped_text = text.replace(":", r"\:").replace("'", r"\'")
+
+    command = ["ffmpeg", "-y"]
+    for image_path in image_paths:
+        command += ["-loop", "1", "-t", str(per_image_seconds), "-i", str(image_path)]
+    command += ["-i", str(audio_path)]
+
+    video_labels = "".join(f"[{i}:v]" for i in range(len(image_paths)))
     drawtext = (
         f"drawtext=text='{escaped_text}':fontcolor=white:fontsize=48:"
-        f"x=(w-text_w)/2:y=h-th-60:box=1:boxcolor=black@0.5:boxborderw=10"
+        f"x=(w-text_w)/2:y=h-th-60:box=1:boxcolor=black@0.5:boxborderw=10:"
+        f"enable='between(t,0,{hook_seconds})'"
     )
-    return [
-        "ffmpeg", "-y",
-        "-loop", "1", "-i", str(image_path),
-        "-i", str(audio_path),
-        "-vf", drawtext,
+    filter_complex = (
+        f"{video_labels}concat=n={len(image_paths)}:v=1:a=0[vcat];"
+        f"[vcat]{drawtext}[vout]"
+    )
+    audio_index = len(image_paths)
+
+    command += [
+        "-filter_complex", filter_complex,
+        "-map", "[vout]", "-map", f"{audio_index}:a",
         "-t", str(duration_seconds),
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-shortest",
         str(out_path),
     ]
+    return command
 
 
-def build_reel(image_path: Path, audio_path: Path, text: str, out_path: Path,
-                *, duration_seconds: int = 8, runner=subprocess.run) -> Path:
+def build_reel(image_paths: list[Path], audio_path: Path, text: str, out_path: Path,
+                *, duration_seconds: int = 8, hook_seconds: int = 3,
+                runner=subprocess.run) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    command = build_ffmpeg_command(image_path, audio_path, text, out_path,
-                                    duration_seconds=duration_seconds)
+    command = build_ffmpeg_command(image_paths, audio_path, text, out_path,
+                                    duration_seconds=duration_seconds,
+                                    hook_seconds=hook_seconds)
     result = runner(command, capture_output=True, text=True)
     if result.returncode != 0:
         raise ReelBuildError(f"ffmpeg failed: {result.stderr}")
@@ -574,7 +615,7 @@ def build_reel(image_path: Path, audio_path: Path, text: str, out_path: Path,
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_reel_builder.py -v`
-Expected: PASS (4 passed)
+Expected: PASS (6 passed)
 
 - [ ] **Step 5: Commit**
 
@@ -665,6 +706,12 @@ from anthropic import Anthropic
 
 CAPTION_PROMPT = """Write an Instagram caption and hashtags for this content idea.
 Concept: {concept}
+
+Optimize for one thing: would a specific person send this to a specific
+friend in a DM? That's the top distribution signal on Instagram right now —
+write like you're describing a moment a reader will recognize and want to
+tag someone in, not a generic joke. Keep it broadly relatable (daily life,
+work, phone habits, group chats) — not tied to any specialist subject.
 
 Respond with ONLY valid JSON: {{"caption": "...", "hashtags": ["...", ...]}}
 Caption should be short (1-2 sentences), punchy, no hashtags inside it.
@@ -843,8 +890,10 @@ git commit -m "feat: add git-push-based public asset hosting helper"
 - Test: `tests/test_generate.py`
 
 **Interfaces:**
-- Consumes: `queue_store.new_item`, `queue_store.append_item` (Task 2); `image_gen.generate_image` (Task 3); `reel_builder.build_reel` (Task 4); `captions.generate_caption` (Task 5); `asset_host.publish_asset` (Task 6)
+- Consumes: `queue_store.new_item`, `queue_store.append_item` (Task 2); `image_gen.generate_image` (Task 3); `reel_builder.build_reel(image_paths: list[Path], audio_path, text, out_path, **kw)` (Task 4); `captions.generate_caption` (Task 5); `asset_host.publish_asset` (Task 6)
 - Produces: `THEMES: list[str]`, `pick_theme(day_index: int) -> str`, `generate_week(*, start_date: date, queue_path: Path, work_dir: Path, repo_root: Path, repo_owner: str, repo_name: str, audio_path: Path) -> list[dict]`
+
+Themes are broad, general relatable-humor concepts (daily life, work, phone/group-chat moments) — not a subject-matter niche like cybersecurity — per the design doc's Content Model. Each reel gets two images generated from the same theme (a "setup" shot and a "punchline" shot) for `reel_builder.build_reel`'s quick-cut.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -873,7 +922,7 @@ def test_generate_week_creates_14_items_with_correct_dates_and_types(tmp_path, m
     monkeypatch.setattr(generate.image_gen, "generate_image",
                          lambda prompt, out_path, **kw: out_path)
     monkeypatch.setattr(generate.reel_builder, "build_reel",
-                         lambda image_path, audio_path, text, out_path, **kw: out_path)
+                         lambda image_paths, audio_path, text, out_path, **kw: out_path)
     monkeypatch.setattr(generate.captions, "generate_caption",
                          lambda concept, **kw: {"caption": "cap", "hashtags": ["h"]})
     monkeypatch.setattr(generate.asset_host, "publish_asset",
@@ -913,14 +962,16 @@ from pathlib import Path
 from pipeline import asset_host, captions, image_gen, queue_store, reel_builder
 
 THEMES = [
-    "cybersecurity red team meme, dark humor, office setting",
-    "AI hacker aesthetic, neon cyberpunk terminal",
-    "sysadmin relatable meme, chaos energy",
-    "zero-day exploit meme, dramatic lighting",
-    "phishing email meme, exaggerated reaction",
-    "firewall breach meme, cinematic style",
-    "password reset rage meme, comic exaggeration",
+    "Monday morning alarm going off, exaggerated dread reaction",
+    "phone battery hitting 1% at the worst possible moment, cinematic panic",
+    "group chat going silent after someone sends a risky text, tense pause",
+    "pretending to pay attention in a boring meeting, deadpan stare",
+    "finally understanding a joke three days late, delayed realization",
+    "a friend cancels plans last minute, mixed relief and betrayal",
+    "trying to adult before coffee, chaotic exhausted energy",
 ]
+
+REEL_SHOT_VARIANTS = ("setup shot", "punchline reaction shot")
 
 
 def pick_theme(day_index: int) -> str:
@@ -952,11 +1003,15 @@ def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
         queue_store.append_item(queue_path, post_item)
         created.append(post_item)
 
-        reel_source_image = work_dir / f"{day.isoformat()}-reel-src.jpg"
-        image_gen.generate_image(theme, reel_source_image)
+        reel_image_paths = []
+        for shot_index, variant in enumerate(REEL_SHOT_VARIANTS):
+            reel_image = work_dir / f"{day.isoformat()}-reel-{shot_index}.jpg"
+            image_gen.generate_image(f"{theme}, {variant}", reel_image)
+            reel_image_paths.append(reel_image)
+
         reel_caption = captions.generate_caption(theme + ", short video reel")
         reel_video = work_dir / f"{day.isoformat()}-reel.mp4"
-        reel_builder.build_reel(reel_source_image, audio_path,
+        reel_builder.build_reel(reel_image_paths, audio_path,
                                  reel_caption["caption"], reel_video)
         reel_relative = f"content/assets/{reel_video.name}"
         reel_url = asset_host.publish_asset(
