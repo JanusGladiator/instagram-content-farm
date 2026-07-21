@@ -2370,6 +2370,10 @@ verification.
 
 No approval-sync step exists (see Task 14) — by the time the Publish routines run, `content/queue.json` already has final `approved`/`rejected` statuses baked in, because that file *is* the one the user exported and Claude committed. If the user hasn't finished reviewing yet when a Publish run fires, items are still `status=pending` and are correctly skipped (existing behavior in `publish.py`, no special-casing needed here).
 
+**Discovered while building this task, not caught earlier:** cloud routines each run from a fresh git clone — there is no persistent local filesystem between runs. `generate_week`/`publish_today` both write `content/queue.json` (and `generate_week` also writes `content/apileague_seen.json`) as plain local file writes; `asset_host.publish_asset` commits generated *assets*, but nothing in the existing code commits `content/queue.json` itself. Without an explicit `git add/commit/push` of that file at the end of every routine run (Generate and both Publish fires), each run's state changes would silently vanish the moment the session ends, and the next run would see stale data. Every routine's prompt below includes this step explicitly — it is not optional.
+
+**Also discovered:** there is currently no documented/discoverable secrets-store for Claude Code cloud routines (checked both GitHub's repo-level Environments — a different, unrelated system — and claude.ai's own environment settings, per the `schedule` skill's guidance). The only mechanism available is embedding secret values directly in each routine's prompt text, which the `schedule` skill's `RemoteTrigger create` call stores as part of the routine's private config. This is a real, accepted deviation from "never hardcode secrets" — explicit user decision, made because no alternative currently exists on this platform. Revisit if Anthropic adds a proper secrets mechanism for routines.
+
 - [ ] **Step 1: Load the `schedule` skill**
 
 Use it to create the scheduled cloud agents below — do not hand-write cron config from memory.
@@ -2381,21 +2385,23 @@ Cron: weekly, Sunday 07:00. The prompt for this routine must instruct the agent 
 1. Read `pipeline/generate.py`'s `THEMES` and `SOURCE_PLAN`, and `pipeline/captions.py`'s `CAPTION_GUIDELINES`/`MEME_TEXT_GUIDELINES`.
 2. For each of the 14 slots (`slot_index` 0-13, `day_index = slot_index // 2`, post if `slot_index` is even else reel), write a caption + 5-10 hashtags per `CAPTION_GUIDELINES`, based on `THEMES[day_index % 7]` — do this for **every** slot, including `repost`-planned ones (their entry is the fallback used only if that slot's live fetch fails; it still must exist).
 3. For every `slot_index` where `SOURCE_PLAN[slot_index] == "template"`, additionally write top/bottom meme text per `MEME_TEXT_GUIDELINES`, based on the same theme.
-4. Assemble these into a `content_plan` dict (`{slot_index: {"caption": ..., "hashtags": [...], **({"top": ..., "bottom": ...} if template-planned else {})}}`) and call `generate.generate_week(..., content_plan=content_plan)` for the coming Mon–Sun with this repo's `repo_owner`/`repo_name`.
-5. (Re)publish the Task 14 review Artifact for the new week's `content/queue.json` (redeploy `review_page.html` to the same Artifact URL — same `file_path` keeps the URL stable).
-6. Send the user a push notification that the week's batch is ready for review.
+4. Ensure `content/audio/background.mp3` exists in the repo (reels need some audio track to mux). If it's missing, generate a short silent placeholder with `ffmpeg -f lavfi -i anullsrc=r=44100:cl=stereo -t 8 -q:a 9 -acodec libmp3lame content/audio/background.mp3` and commit it once — it's reused every week. Note in the run summary that the user can replace this with a real royalty-free track (Pixabay Audio / YouTube Audio Library) anytime by committing over the same path.
+5. Assemble the written content into a `content_plan` dict (`{slot_index: {"caption": ..., "hashtags": [...], **({"top": ..., "bottom": ...} if template-planned else {})}}`) and call `generate.generate_week(..., content_plan=content_plan)` for the coming Mon–Sun with this repo's `repo_owner`/`repo_name` and `audio_path=Path('content/audio/background.mp3')`.
+6. `git add content/queue.json content/apileague_seen.json && git commit -m "content: weekly batch for <week start date>" && git push` — required, see the note above this step list.
+7. (Re)publish the Task 14 review Artifact for the new week's `content/queue.json` (redeploy `review_page.html` to the same Artifact URL — same `file_path` keeps the URL stable).
+8. Send the user a push notification that the week's batch is ready for review.
 
 - [ ] **Step 3: Create the daily Publish routine — image, 12:00**
 
-Cron: daily, 12:00. Prompt instructs the agent to run `python -m pipeline.publish --type post`. Nothing else — no sync step.
+Cron: daily, 12:00. Prompt instructs the agent to run `python -m pipeline.publish --type post` with `IG_ACCESS_TOKEN`/`IG_BUSINESS_ID` set inline (no OS-level env var mechanism exists for routines — see the secrets note above this step list). If the command prints `skip: ...`, nothing was approved for today — that's expected, not an error, stop here. If it succeeds, `git add content/queue.json && git commit -m "publish: mark today's post as posted" && git push` — required, or the status update is lost at session end. If the command raises an error (not the `skip:` case), do not retry silently — report the exact error in the run summary (likely an expired `IG_ACCESS_TOKEN`, ~60 day lifetime).
 
 - [ ] **Step 4: Create the daily Publish routine — reel, 20:00**
 
-Same as Step 3 but `python -m pipeline.publish --type reel`.
+Same as Step 3 but `--type reel` and commit message `"publish: mark today's reel as posted"`.
 
-- [ ] **Step 5: Store secrets in the routines' secret configuration**
+- [ ] **Step 5: Embed secrets in each routine's prompt**
 
-`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`, `APILEAGUE_API_KEY`, and git push credentials for the asset repo — per the loaded `schedule` skill's mechanism for routine secrets. Never in a committed file. No `ANTHROPIC_API_KEY` needed (see Global Constraints).
+No routine-level secrets store exists (see the note above this step list) — `IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `APILEAGUE_API_KEY`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME` are embedded as literal values in each routine's prompt text where needed (Generate needs `APILEAGUE_API_KEY`/`GITHUB_REPO_OWNER`/`GITHUB_REPO_NAME`; both Publish routines need `IG_ACCESS_TOKEN`/`IG_BUSINESS_ID`). No `ANTHROPIC_API_KEY` needed (see Global Constraints). Git push access is provided by the routine's own repo connection (the `sources: git_repository` the routine is configured against) — no separate GitHub token needed unless that turns out not to include write access, in which case add one here too.
 
 - [ ] **Step 6: Verify routines are listed**
 
