@@ -40,7 +40,8 @@ def download_template_image(template: dict, out_path: Path, *, session=None) -> 
 def render_caption_on_template(template_image: Path, top_text: str, bottom_text: str,
                                 out_path: Path, *, runner=subprocess.run) -> Path:
     def _escape(text: str) -> str:
-        return text.replace(":", r"\:").replace("'", r"\'").upper()
+        # See reel_builder.build_ffmpeg_command for why this isn't `\'`.
+        return text.replace(":", r"\:").replace("'", r"'\''").upper()
 
     top_draw = (
         f"drawtext=text='{_escape(top_text)}':fontcolor=white:fontsize=48:"

@@ -13,7 +13,11 @@ def build_ffmpeg_command(image_paths: list[Path], audio_path: Path, text: str,
         raise ValueError("image_paths must contain at least one image")
 
     per_image_seconds = duration_seconds / len(image_paths)
-    escaped_text = text.replace(":", r"\:").replace("'", r"\'")
+    # A backslash cannot escape a quote *inside* a single-quoted ffmpeg filter
+    # value -- the parser doesn't treat it specially there. The correct way to
+    # get a literal quote is to close the quoted string, insert an escaped
+    # quote outside of it, then reopen: 'it'\''s' -> it's.
+    escaped_text = text.replace(":", r"\:").replace("'", r"'\''")
 
     command = ["ffmpeg", "-y"]
     for image_path in image_paths:
