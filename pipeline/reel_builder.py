@@ -24,14 +24,19 @@ def build_ffmpeg_command(image_paths: list[Path], audio_path: Path, text: str,
         command += ["-loop", "1", "-t", str(per_image_seconds), "-i", str(image_path)]
     command += ["-i", str(audio_path)]
 
-    video_labels = "".join(f"[{i}:v]" for i in range(len(image_paths)))
+    # Source images (template renders especially) commonly have odd
+    # width/height; libx264 requires both to be even for yuv420p output.
+    scale_filters = ";".join(
+        f"[{i}:v]scale=trunc(iw/2)*2:trunc(ih/2)*2[v{i}]" for i in range(len(image_paths))
+    )
+    video_labels = "".join(f"[v{i}]" for i in range(len(image_paths)))
     drawtext = (
         f"drawtext=text='{escaped_text}':fontcolor=white:fontsize=48:"
         f"x=(w-text_w)/2:y=h-th-60:box=1:boxcolor=black@0.5:boxborderw=10:"
         f"enable='between(t,0,{hook_seconds})'"
     )
     filter_complex = (
-        f"{video_labels}concat=n={len(image_paths)}:v=1:a=0[vcat];"
+        f"{scale_filters};{video_labels}concat=n={len(image_paths)}:v=1:a=0[vcat];"
         f"[vcat]{drawtext}[vout]"
     )
     audio_index = len(image_paths)
