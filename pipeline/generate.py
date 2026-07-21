@@ -5,7 +5,6 @@ from pipeline import (
     asset_host,
     captions,
     image_gen,
-    imgur_source,
     queue_store,
     reel_builder,
     template_source,
@@ -23,14 +22,20 @@ THEMES = [
 
 REEL_SHOT_VARIANTS = ("setup shot", "punchline reaction shot")
 
-IMGUR_TAGS = ["memes", "funny", "wholesomememes", "me_irl", "relatable"]
-MIN_SCORE = 500
+# No free/legitimate "repost" source is currently available — checked
+# Reddit, Imgur, Tenor, Giphy, Tumblr, and Google Images, each fails for a
+# different, verified reason (registration closed, syndication forbidden,
+# or both). See the design spec's "Repost Sourcing" section for the full
+# history. `imgur_source.py` and `reddit_source.py` stay in the codebase,
+# dormant with their own passing tests, in case a platform reopens this
+# path later — but this module no longer dispatches to either.
 
-# 14 slots = 7 days x (post, reel). 5 original / 5 template / 4 repost.
+# 14 slots = 7 days x (post, reel). 7 original / 7 template.
 SOURCE_PLAN = [
-    "original", "template", "repost", "original", "template",
-    "repost", "original", "template", "repost", "original",
-    "template", "repost", "original", "template",
+    "original", "template", "original", "template",
+    "original", "template", "original", "template",
+    "original", "template", "original", "template",
+    "original", "template",
 ]
 
 
@@ -86,34 +91,9 @@ def _produce_template(*, slot_type: str, theme: str, work_dir: Path, day_label: 
     return reel_video, caption
 
 
-def _produce_repost(*, slot_type: str, work_dir: Path, day_label: str, tag: str,
-                     imgur_client_id: str, seen_path: Path) -> tuple[Path, dict] | None:
-    posts = imgur_source.fetch_tag_gallery(tag, imgur_client_id)
-    seen_ids = imgur_source.load_seen_ids(seen_path)
-    media_kind = "image" if slot_type == "post" else "video"
-    post = imgur_source.pick_post(posts, media_kind=media_kind,
-                                   min_score=MIN_SCORE, seen_ids=seen_ids)
-    if post is None:
-        return None
-
-    caption = captions.generate_caption(
-        "polish this into a punchy shareable caption without changing its "
-        f"meaning: {post['title']}"
-    )
-
-    if slot_type == "post":
-        asset_path = work_dir / f"{day_label}-post-repost.jpg"
-    else:
-        asset_path = work_dir / f"{day_label}-reel-repost.mp4"
-    imgur_source.download_media(post, asset_path)
-
-    imgur_source.mark_seen(seen_path, post["id"])
-    return asset_path, caption
-
-
 def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
                    repo_root: Path, repo_owner: str, repo_name: str,
-                   audio_path: Path, imgur_client_id: str, seen_path: Path) -> list[dict]:
+                   audio_path: Path) -> list[dict]:
     work_dir.mkdir(parents=True, exist_ok=True)
     created = []
     templates = template_source.list_templates()
@@ -122,11 +102,9 @@ def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
         day = start_date + timedelta(days=offset)
         day_label = day.isoformat()
         theme = pick_theme(offset)
-        tag = IMGUR_TAGS[offset % len(IMGUR_TAGS)]
 
         for slot_type in ("post", "reel"):
             source = source_for_slot(offset, slot_type)
-            result = None
 
             if source == "template":
                 result = _produce_template(
@@ -134,18 +112,7 @@ def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
                     day_label=day_label, audio_path=audio_path,
                     templates=templates, day_index=offset,
                 )
-            elif source == "repost":
-                try:
-                    result = _produce_repost(
-                        slot_type=slot_type, work_dir=work_dir, day_label=day_label,
-                        tag=tag, imgur_client_id=imgur_client_id, seen_path=seen_path,
-                    )
-                except imgur_source.ImgurSourceError:
-                    result = None
-                if result is None:
-                    source = "original"
-
-            if source == "original":
+            else:
                 result = _produce_original(
                     slot_type=slot_type, theme=theme, work_dir=work_dir,
                     day_label=day_label, audio_path=audio_path,
