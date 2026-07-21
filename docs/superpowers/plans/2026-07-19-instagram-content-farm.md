@@ -12,15 +12,15 @@
 
 - Official Meta Graph API only — no unofficial/private IG API libraries, no browser automation (spec: "Hard Constraint: Official API Only").
 - `original` images via Pollinations.ai (free, no key). `template` blanks via Imgflip's public `get_memes` endpoint (free, no key). `repost` content via Reddit's official free API — no paid content-sourcing API for any source.
-- Reel audio (for `original`/`template` sources) must be royalty-free (Pixabay Audio / YouTube Audio Library or equivalent) — never pulled from Instagram's in-app audio library (unreachable via API anyway). `repost` reels use the Reddit video's own audio (merged from DASH streams), not the royalty-free track.
+- Reel audio (for `original`/`template` sources) must be royalty-free (Pixabay Audio / YouTube Audio Library or equivalent) — never pulled from Instagram's in-app audio library (unreachable via API anyway). `repost` reels use the source media's own audio/silence as-is, not the royalty-free track.
 - Every one of the 14 weekly slots (7 posts + 7 reels) has a `source` of `original`, `template`, or `repost`, assigned from the fixed rotation `SOURCE_PLAN = ["original","template","repost","original","template","repost","original","template","repost","original","template","repost","original","template"]` (5 original / 5 template / 4 repost) — exact list, do not rebalance without updating this plan.
-- Reddit sourcing: subreddits exactly `["memes", "funny", "wholesomememes", "AdviceAnimals", "mildlyinteresting"]`, `MIN_UPVOTES = 500`, listing timeframe `"week"`, hard NSFW filter (`over_18 == false`), dedupe against `content/reddit_seen.json`.
-- Reposted content is never credited to the original poster or subreddit — explicit user decision, recorded with its risk tradeoff in the spec's "Repost Legal Posture" section. Do not add attribution back in.
+- Repost sourcing is **Imgur** (Task 17/18), not Reddit — Reddit's legacy Data API closed new-app registration to moderation-only use cases in late 2025 and is not viable for this project; `pipeline/reddit_source.py` stays in the codebase, fully tested, but unused. Imgur tags exactly `["memes", "funny", "wholesomememes", "me_irl", "relatable"]`, `MIN_UPS = 500`, listing sort/window `"top"`/`"week"`, hard NSFW filter (`nsfw is False` exactly, not merely falsy), albums excluded, dedupe against `content/imgur_seen.json`.
+- Reposted content is never credited to the original poster — explicit user decision, recorded with its risk tradeoff in the spec's "Repost Legal Posture" section. Do not add attribution back in.
 - If a `repost` slot has no qualifying post available, it falls back to `original` for that slot rather than failing the week's batch — same resilience pattern as every other producer failure in this pipeline.
-- Secrets (`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, GitHub push credentials, `ANTHROPIC_API_KEY`) are environment variables only — never hardcoded, never committed. `.gitignore` already excludes `.env*`.
+- Secrets (`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `IMGUR_CLIENT_ID`, GitHub push credentials, `ANTHROPIC_API_KEY`) are environment variables only — never hardcoded, never committed. `.gitignore` already excludes `.env*`. (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` are no longer used by the active pipeline.)
 - `content/queue.json` is the single source of truth for what gets published; nothing auto-posts without `status == "approved"` on the correct `scheduled_date`. `publish.py` treats all three sources identically — it only ever reads `asset_url` and `caption`.
 - A `pending` item at its scheduled publish time is skipped and logged, never force-posted, never re-prompted.
-- No test may hit a live external API (Pollinations, Imgflip, Reddit, Anthropic, Graph API) or perform a real `git push`/`ffmpeg` binary invocation — all external calls are injected via a `session`/`runner`/`client` parameter and replaced with fakes in tests.
+- No test may hit a live external API (Pollinations, Imgflip, Imgur, Anthropic, Graph API) or perform a real `git push`/`ffmpeg` binary invocation — all external calls are injected via a `session`/`runner`/`client` parameter and replaced with fakes in tests.
 
 ---
 
@@ -2287,7 +2287,12 @@ Long-lived tokens expire ~60 days. There is no code task for renewal in this pla
 
 ---
 
-### Task 13: Reddit API app setup
+### Task 13: Reddit API app setup — DROPPED
+
+Reddit closed new-app registration on its legacy Data API to moderation-only
+use cases in late 2025; this project doesn't qualify and isn't pursuing it
+further (see spec's "Imgur Sourcing" section). Superseded by Task 17/18
+(Imgur). Kept below as a historical record; do not execute.
 
 **Files:** None (external setup + verification using Task 8's `get_access_token`/`fetch_top_posts`)
 
@@ -2383,7 +2388,7 @@ Same as Step 3 but `python -m pipeline.publish --type reel`.
 
 - [ ] **Step 5: Store secrets in the routines' secret configuration**
 
-`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `ANTHROPIC_API_KEY`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`, and git push credentials for the asset repo — per the loaded `schedule` skill's mechanism for routine secrets. Never in a committed file.
+`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `ANTHROPIC_API_KEY`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`, `IMGUR_CLIENT_ID`, and git push credentials for the asset repo — per the loaded `schedule` skill's mechanism for routine secrets. Never in a committed file.
 
 - [ ] **Step 6: Verify routines are listed**
 
@@ -2412,10 +2417,8 @@ generate.generate_week(
     start_date=date.today(), queue_path=Path('content/queue.json'),
     work_dir=Path('.work'), repo_root=Path('.'),
     repo_owner='<owner>', repo_name='<repo>', audio_path=Path('<royalty-free-audio.mp3>'),
-    reddit_client_id=os.environ['REDDIT_CLIENT_ID'],
-    reddit_client_secret=os.environ['REDDIT_CLIENT_SECRET'],
-    reddit_user_agent=os.environ['REDDIT_USER_AGENT'],
-    seen_path=Path('content/reddit_seen.json'),
+    imgur_client_id=os.environ['IMGUR_CLIENT_ID'],
+    seen_path=Path('content/imgur_seen.json'),
 )
 "
 ```
@@ -2445,6 +2448,275 @@ Expected: item status becomes `posted` in `content/queue.json`, and the post is 
 - [ ] **Step 5: Confirm the full week runs unattended for the remainder of the current week**
 
 No further action — the two daily Publish routines should now post the remaining approved items on schedule. Check back in a few days that `content/queue.json` shows `posted` entries advancing day by day, across all three sources.
+
+---
+
+### Task 17: Imgur source (repost sourcing, replaces Reddit as the active source)
+
+**Files:**
+- Create: `pipeline/imgur_source.py`
+- Test: `tests/test_imgur_source.py`
+
+**Interfaces:**
+- Produces: `ImgurSourceError(RuntimeError)`, `fetch_tag_gallery(tag: str, client_id: str, *, sort: str = "top", window: str = "week", page: int = 0, session=None) -> list[dict]`, `pick_post(posts: list[dict], *, media_kind: str, min_ups: int, seen_ids: set[str]) -> dict | None`, `download_media(post: dict, out_path: Path, *, session=None) -> Path`, `load_seen_ids(path: Path) -> set[str]`, `mark_seen(path: Path, post_id: str) -> None`
+
+Auth is a `Client-ID` header, not OAuth — simpler than Reddit's flow (no token to fetch, no client secret). Imgur serves animated/video content as a single playable file at `link`, so `download_media` handles both images and videos with one code path — no DASH-style audio/video merge like `reddit_source.download_video_post` needed.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `tests/test_imgur_source.py`:
+
+```python
+from pathlib import Path
+import pytest
+from pipeline import imgur_source
+
+
+class FakeResponse:
+    def __init__(self, status_code, body=None, content=b""):
+        self.status_code = status_code
+        self._body = body
+        self.content = content
+
+    def json(self):
+        return self._body
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.responses.pop(0)
+
+
+def test_fetch_tag_gallery_returns_data_list_on_success():
+    body = {"data": [{"id": "a"}, {"id": "b"}], "success": True, "status": 200}
+    session = FakeSession([FakeResponse(200, body=body)])
+
+    posts = imgur_source.fetch_tag_gallery("memes", "client123", session=session)
+
+    assert posts == [{"id": "a"}, {"id": "b"}]
+    url, kwargs = session.calls[0]
+    assert url == "https://api.imgur.com/3/gallery/t/memes/top/week/0"
+    assert kwargs["headers"]["Authorization"] == "Client-ID client123"
+
+
+def test_fetch_tag_gallery_raises_on_error_status():
+    session = FakeSession([FakeResponse(403, body={"success": False, "data": {"error": "bad client id"}})])
+
+    with pytest.raises(imgur_source.ImgurSourceError):
+        imgur_source.fetch_tag_gallery("memes", "bad-client", session=session)
+
+
+def _post(id_, *, ups=1000, nsfw=False, is_album=False, animated=False):
+    return {"id": id_, "ups": ups, "nsfw": nsfw, "is_album": is_album, "animated": animated}
+
+
+def test_pick_post_skips_seen_ids():
+    posts = [_post("a"), _post("b")]
+    result = imgur_source.pick_post(posts, media_kind="image", min_ups=0, seen_ids={"a"})
+    assert result["id"] == "b"
+
+
+def test_pick_post_skips_nsfw_unless_explicitly_false():
+    posts = [_post("a", nsfw=True), _post("b", nsfw=None), _post("c", nsfw=False)]
+    result = imgur_source.pick_post(posts, media_kind="image", min_ups=0, seen_ids=set())
+    assert result["id"] == "c"
+
+
+def test_pick_post_skips_albums():
+    posts = [_post("a", is_album=True), _post("b")]
+    result = imgur_source.pick_post(posts, media_kind="image", min_ups=0, seen_ids=set())
+    assert result["id"] == "b"
+
+
+def test_pick_post_skips_below_min_ups():
+    posts = [_post("a", ups=10), _post("b", ups=1000)]
+    result = imgur_source.pick_post(posts, media_kind="image", min_ups=500, seen_ids=set())
+    assert result["id"] == "b"
+
+
+def test_pick_post_filters_by_media_kind_video():
+    posts = [_post("a", animated=False), _post("b", animated=True)]
+    result = imgur_source.pick_post(posts, media_kind="video", min_ups=0, seen_ids=set())
+    assert result["id"] == "b"
+
+
+def test_pick_post_returns_none_when_no_match():
+    posts = [_post("a", ups=0)]
+    result = imgur_source.pick_post(posts, media_kind="image", min_ups=500, seen_ids=set())
+    assert result is None
+
+
+def test_download_media_writes_file(tmp_path):
+    session = FakeSession([FakeResponse(200, content=b"media-bytes")])
+    out_path = tmp_path / "post.jpg"
+
+    result = imgur_source.download_media({"id": "a", "link": "http://x/a.jpg"}, out_path, session=session)
+
+    assert result == out_path
+    assert out_path.read_bytes() == b"media-bytes"
+
+
+def test_download_media_raises_on_failure(tmp_path):
+    session = FakeSession([FakeResponse(404)])
+
+    with pytest.raises(imgur_source.ImgurSourceError):
+        imgur_source.download_media(
+            {"id": "a", "link": "http://x/a.jpg"}, tmp_path / "post.jpg", session=session,
+        )
+
+
+def test_load_seen_ids_empty_when_missing(tmp_path):
+    assert imgur_source.load_seen_ids(tmp_path / "seen.json") == set()
+
+
+def test_mark_seen_persists_and_dedupes(tmp_path):
+    path = tmp_path / "seen.json"
+    imgur_source.mark_seen(path, "a")
+    imgur_source.mark_seen(path, "b")
+    imgur_source.mark_seen(path, "a")
+    assert imgur_source.load_seen_ids(path) == {"a", "b"}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pytest tests/test_imgur_source.py -v`
+Expected: FAIL with `ModuleNotFoundError`
+
+- [ ] **Step 3: Implement `pipeline/imgur_source.py`**
+
+```python
+import json
+from pathlib import Path
+
+import requests
+
+IMGUR_API_BASE = "https://api.imgur.com/3"
+
+
+class ImgurSourceError(RuntimeError):
+    pass
+
+
+def fetch_tag_gallery(tag: str, client_id: str, *, sort: str = "top",
+                       window: str = "week", page: int = 0, session=None) -> list[dict]:
+    session = session or requests.Session()
+    response = session.get(
+        f"{IMGUR_API_BASE}/gallery/t/{tag}/{sort}/{window}/{page}",
+        headers={"Authorization": f"Client-ID {client_id}"},
+        timeout=30,
+    )
+    body = response.json()
+    if response.status_code != 200 or not body.get("success"):
+        raise ImgurSourceError(f"imgur gallery fetch failed for tag={tag!r}: {body}")
+    return body["data"]
+
+
+def pick_post(posts: list[dict], *, media_kind: str, min_ups: int,
+              seen_ids: set[str]) -> dict | None:
+    for post in posts:
+        if post["id"] in seen_ids:
+            continue
+        if post.get("is_album"):
+            continue
+        if post.get("nsfw") is not False:
+            continue
+        if post.get("ups", 0) < min_ups:
+            continue
+        is_video = bool(post.get("animated"))
+        if media_kind == "image" and not is_video:
+            return post
+        if media_kind == "video" and is_video:
+            return post
+    return None
+
+
+def download_media(post: dict, out_path: Path, *, session=None) -> Path:
+    session = session or requests.Session()
+    response = session.get(post["link"], timeout=60)
+    if response.status_code != 200:
+        raise ImgurSourceError(
+            f"failed to download media for post {post['id']}: status {response.status_code}"
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(response.content)
+    return out_path
+
+
+def load_seen_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return set(json.loads(path.read_text(encoding="utf-8")))
+
+
+def mark_seen(path: Path, post_id: str) -> None:
+    seen = load_seen_ids(path)
+    seen.add(post_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted(seen), indent=2), encoding="utf-8")
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `pytest tests/test_imgur_source.py -v`
+Expected: PASS (12 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add pipeline/imgur_source.py tests/test_imgur_source.py
+git commit -m "feat: add Imgur-backed repost sourcing module (replaces Reddit)"
+```
+
+---
+
+### Task 18: Swap generate.py's repost dispatch from Reddit to Imgur
+
+**Files:**
+- Modify: `pipeline/generate.py`
+- Modify: `tests/test_generate.py`
+
+**Interfaces:**
+- Consumes: `imgur_source.fetch_tag_gallery`, `imgur_source.pick_post`, `imgur_source.download_media`, `imgur_source.load_seen_ids`, `imgur_source.mark_seen`, `imgur_source.ImgurSourceError` (Task 17)
+- Produces: revised `generate_week(*, start_date: date, queue_path: Path, work_dir: Path, repo_root: Path, repo_owner: str, repo_name: str, audio_path: Path, imgur_client_id: str, seen_path: Path) -> list[dict]` — drops the `reddit_client_id`/`reddit_client_secret`/`reddit_user_agent` parameters entirely (Imgur needs only `imgur_client_id`, no token acquisition step); `SUBREDDITS` renamed/replaced by `IMGUR_TAGS = ["memes", "funny", "wholesomememes", "me_irl", "relatable"]`; `MIN_UPVOTES` renamed `MIN_UPS` (same value, 500)
+
+This is a direct swap of `_produce_repost`'s internals and `generate_week`'s repost dispatch — same shape as the resilience pattern already reviewed for the Reddit version (any `ImgurSourceError` during the fetch/pick/download chain results in `result = None`, which the existing `if result is None: source = "original"` fallback logic already handles unchanged). Since Imgur has no separate auth step to fail before the fetch call, there's no separate "pre-check token" step like the Reddit version had — just wrap the whole `_produce_repost` call in `try/except imgur_source.ImgurSourceError: result = None`, same as the narrow per-call catch already established.
+
+- [ ] **Step 1: Update `tests/test_generate.py`**
+
+In `_patch_all_producers`, replace every `generate.reddit_source.*` monkeypatch with the equivalent `generate.imgur_source.*` one:
+- `reddit_source.fetch_top_posts` → `imgur_source.fetch_tag_gallery`, faked as `lambda tag, client_id, **kw: [{"id": "abc", "title": "funny thing", "link": "http://x/img.jpg"}]`
+- `reddit_source.load_seen_ids` → `imgur_source.load_seen_ids`
+- `reddit_source.pick_post` → `imgur_source.pick_post`, faked as `lambda posts, *, media_kind, min_ups, seen_ids: (posts[0] if repost_post else None)`
+- `reddit_source.download_image_post` / `download_video_post` → both collapse into one `imgur_source.download_media`, faked as `lambda post, out_path, **kw: out_path`
+- `reddit_source.mark_seen` → `imgur_source.mark_seen`
+
+Update `_run_generate_week` to pass `imgur_client_id="client123"` instead of `reddit_access_token`/`reddit_client_id`/`reddit_client_secret`/`reddit_user_agent`.
+
+Run `pytest tests/test_generate.py -v` — expect these to fail (current `generate.py` still imports/calls `reddit_source`, not `imgur_source`) before proceeding to Step 2.
+
+- [ ] **Step 2: Update `pipeline/generate.py`**
+
+- Replace the `reddit_source` import with `imgur_source`.
+- Replace `SUBREDDITS` with `IMGUR_TAGS = ["memes", "funny", "wholesomememes", "me_irl", "relatable"]`.
+- Replace `MIN_UPVOTES = 500` with `MIN_UPS = 500`.
+- Change `generate_week`'s signature: drop `reddit_client_id`, `reddit_client_secret`, `reddit_user_agent`; add `imgur_client_id: str`.
+- Remove the `get_access_token` try/except preamble entirely (no longer applicable).
+- In `_produce_repost`, rename to use Imgur calls: `imgur_source.fetch_tag_gallery(tag, imgur_client_id)`, `imgur_source.pick_post(posts, media_kind=media_kind, min_ups=MIN_UPS, seen_ids=seen_ids)`, single `imgur_source.download_media(post, asset_path)` call for both post and reel slot types (replacing the separate `download_image_post`/`download_video_post` branch), `imgur_source.mark_seen(seen_path, post["id"])`.
+- In the per-slot dispatch loop, replace the two-step "check token is None, else try/except around `_produce_repost`" with a single `try: result = _produce_repost(...) except imgur_source.ImgurSourceError: result = None`.
+
+Run `pytest tests/test_generate.py -v` and `pytest -q` (full suite) to confirm everything passes.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add pipeline/generate.py tests/test_generate.py
+git commit -m "refactor: swap generate.py's repost dispatch from Reddit to Imgur"
+```
 
 ---
 
