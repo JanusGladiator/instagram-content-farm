@@ -54,70 +54,75 @@ project (user has not done this yet) — see "Setup" below.
   writing top/bottom text rendered onto it via `ffmpeg`. Reels: the same
   rendered template image quick-cut through the same reel pipeline as
   `original`.
-- **`repost`** — pulled live from a curated list of general-humor
-  subreddits via Reddit's official free API (see "Reddit Sourcing" below).
-  Image posts become post assets; video posts become reel assets directly
-  (no `ffmpeg` reel composition — the repost *is* the asset). Caption is a
-  lightly shareability-polished version of the Reddit post's own title. Not
-  credited to the original poster/subreddit — see "Repost Legal Posture"
-  below for why, and what risk that accepts.
+- **`repost`** — pulled live from a curated list of general-humor tags on
+  Imgur's official free gallery API (see "Imgur Sourcing" below; Reddit was
+  the original design but is unavailable — see that section's history
+  note). Image posts become post assets; video/animated posts become reel
+  assets directly (no `ffmpeg` reel composition — the repost *is* the
+  asset). Caption is a lightly shareability-polished version of the
+  gallery post's own title. Not credited to the original poster — see
+  "Repost Legal Posture" below for why, and what risk that accepts.
 - Instagram's 2026 "Originality Score" penalizes recycled/templated
   content; keeping `original` as the largest single bucket (5/14) limits
   how much of the week is exposed to that penalty while still delivering
   the variety the user wants.
 
-### Reddit Sourcing
+### Imgur Sourcing (active) — history: Reddit Sourcing (dormant)
 
-**Status as of 2026-07-20: unavailable, not pursued further.** Reddit closed
-self-serve registration for new apps on its legacy Data API (the one this
-design targets) in late 2025; new app registration is now explicitly scoped
-to "valid moderation use case" per Reddit's own developer page, which this
-project doesn't qualify as. No viable free/legitimate alternative source
-was found (the old scraper-style free meme APIs, e.g. `meme-api.com`, are
-dead; the remaining free "meme APIs" are template-generators — the same
-category `template` sourcing already covers, not real reposts). The design
-below is kept as-is (it's fully implemented and tested) because `generate_week`
-degrades gracefully — every `repost`-planned slot silently becomes
-`original` when Reddit auth fails, at zero ongoing cost — so there is
-nothing to remove; `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` are left as
-placeholder values in the routine's secret store. Revisit only if Reddit's
-policy changes.
+**Reddit history, 2026-07-20:** the original design targeted Reddit's
+legacy Data API (`client_credentials` OAuth). Reddit closed self-serve
+registration for new apps on that API in late 2025; new app registration
+is now explicitly scoped to "valid moderation use case" per Reddit's own
+developer page, which this project doesn't qualify as. `pipeline/reddit_source.py`
+is fully implemented, tested, and reviewed — it's left in the codebase
+unused rather than deleted, in case Reddit's policy ever changes. No code
+currently calls it.
 
-- Subreddits: `memes`, `funny`, `wholesomememes`, `AdviceAnimals`,
-  `mildlyinteresting` — general relatable humor, matching the broad-niche
-  content model above.
-- Auth: Reddit `client_credentials` OAuth grant (a free "script" app,
-  `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET`) — read-only access to public
-  listings, no Reddit account password needed as a secret.
-- Listing: `GET /r/{subreddit}/top?t=week&limit=25`.
-- Filters: `over_18 == false` (hard requirement — Instagram content policy
-  is SFW regardless of subreddit norms), score (`ups`) at or above a
-  minimum quality bar, and not already used (deduped against a persisted
-  list of previously-used Reddit post IDs so nothing repeats).
-- Video posts on Reddit often split video and audio into separate DASH
-  streams (`fallback_url` for video, a sibling `DASH_audio.mp4` for audio,
-  when audio exists at all). The pipeline downloads both and merges them
-  with `ffmpeg` before the file is usable as a reel asset. If no audio
-  stream exists, the video is used as-is.
+**Imgur, adopted 2026-07-20:** Imgur's API remains free, self-service (no
+approval queue) for non-commercial/low-volume use, and its gallery
+endpoints cover the same "browse top posts by tag/topic" shape Reddit
+would have provided — plus a large share of Reddit meme content
+originates from Imgur uploads anyway. Auth is simpler than Reddit's: a
+`Client-ID` header is sufficient for anonymous public-gallery reads, no
+OAuth handshake and no client secret needed.
+
+- Tags: `memes`, `funny`, `wholesomememes`, `me_irl`, `relatable` —
+  general relatable humor, matching the broad-niche content model above.
+- Auth: `Authorization: Client-ID <IMGUR_CLIENT_ID>` header — a free,
+  self-registered Imgur application (imgur.com/account/settings/apps),
+  read-only public access, no client secret or user OAuth needed.
+- Listing: `GET /3/gallery/t/{tag}/top/week/{page}`.
+- Filters: `nsfw` must be explicitly `false` (hard requirement — anything
+  not explicitly marked SFW is excluded, matching this pipeline's SFW-only
+  policy), `is_album` excluded (single image/video posts only, matching
+  the flat single-asset model used everywhere else in this pipeline),
+  `ups` at or above a minimum quality bar, and not already used (deduped
+  against a persisted list of previously-used Imgur post IDs).
+- Media: Imgur serves animated content (GIFs, native video uploads) as a
+  single playable file directly at the item's `link` — no separate
+  video/audio stream merge needed (unlike Reddit's DASH split). One
+  download call handles both images and videos.
 - If no suitable post is found for a `repost` slot (everything fetched is
-  NSFW, below the upvote bar, or already used), that slot falls back to
-  `original` instead of failing the whole week's batch — consistent with
-  every other per-slot failure mode in this pipeline (see Error Handling).
+  NSFW/an album/below the score bar/already used) or the Imgur API call
+  itself fails (bad client ID, rate limit, network error), that slot falls
+  back to `original` instead of failing the whole week's batch — same
+  resilience pattern as every other per-slot failure mode in this pipeline
+  (see Error Handling).
 
 ### Repost Legal Posture
 
 Reposting images/videos originally created by someone other than the
-Reddit poster carries real copyright exposure regardless of whether the
-Reddit poster is credited — crediting the Reddit *poster* does not credit
-the actual rights holder, who is usually unknown. The realistic worst case
-at this account's scale is a DMCA takedown / content removal request, not
-litigation — a common, accepted outcome for meme accounts operating this
-way. Per explicit user direction, reposts are not credited (crediting the
-Reddit poster doesn't reduce the underlying copyright risk, so the user
-chose not to add it). This is a risk the user has knowingly accepted for
-their own account; it is not this project's place to silently reintroduce
-credit-as-mitigation after that decision, but the tradeoff is recorded here
-so it isn't forgotten.
+uploading poster (whichever platform sources it — Reddit or Imgur) carries
+real copyright exposure regardless of whether that poster is credited —
+crediting the poster does not credit the actual rights holder, who is
+usually unknown. The realistic worst case at this account's scale is a
+DMCA takedown / content removal request, not litigation — a common,
+accepted outcome for meme accounts operating this way. Per explicit user
+direction, reposts are not credited (crediting the poster doesn't reduce
+the underlying copyright risk, so the user chose not to add it). This is a
+risk the user has knowingly accepted for their own account; it is not this
+project's place to silently reintroduce credit-as-mitigation after that
+decision, but the tradeoff is recorded here so it isn't forgotten.
 
 ### Content Strategy Basis
 
@@ -142,9 +147,8 @@ crediting.
           original → Pollinations.ai image(s) (+ ffmpeg reel composite)
           template → Imgflip blank template + Claude top/bottom text,
                       rendered via ffmpeg (+ ffmpeg reel composite)
-          repost   → Reddit top post (image or video), video reels merged
-                      video+audio via ffmpeg — used directly as the asset,
-                      no reel composite step
+          repost   → Imgur top gallery post (image or video/animated),
+                      used directly as the asset, no reel composite step
         each producer degrades independently on failure (retry, then skip
         that slot or fall back to `original`) — never blocks the rest of
         the week's batch
@@ -211,18 +215,20 @@ a routine can see" to "click approve, then mention it once in chat."
 
 - **`generate.py`** — weekly content orchestrator. For each of the 14
   weekly slots, dispatches to the right source producer (Pollinations,
-  Imgflip+ffmpeg, or Reddit), calls Claude for captions, pushes assets to
+  Imgflip+ffmpeg, or Imgur), calls Claude for captions, pushes assets to
   the asset-hosting repo, writes `content/queue.json` entries, triggers the
   Artifact review page rebuild.
 - **`image_gen.py`** — Pollinations.ai client for `original` images.
 - **`reel_builder.py`** — `ffmpeg` quick-cut reel composer, used by
   `original` and `template` sources (not `repost`, which uses the fetched
-  video directly).
+  media directly).
 - **`template_source.py`** — Imgflip blank-template fetch + `ffmpeg`
   top/bottom text rendering for `template` sources.
-- **`reddit_source.py`** — Reddit OAuth, listing fetch, NSFW/score
-  filtering, dedupe, image/video download, DASH audio+video merge for
-  `repost` sources.
+- **`imgur_source.py`** — Imgur Client-ID gallery-by-tag fetch, NSFW/album/
+  score filtering, dedupe, single-call image/video download for `repost`
+  sources.
+- **`reddit_source.py`** — dormant/unused (see "Imgur Sourcing" for why).
+  Kept in the codebase, fully tested, in case Reddit's policy changes.
 - **`captions.py`** — Claude-backed caption/hashtag generation (all
   sources) and meme top/bottom text generation (`template` source only).
 - **`content/queue.json`** — flat-file queue. One record per content item:
@@ -242,8 +248,9 @@ a routine can see" to "click approve, then mention it once in chat."
   ```
   A flat file is sufficient at this volume (14 items/week); no database is
   needed.
-- **`content/reddit_seen.json`** — flat list of previously-used Reddit post
-  IDs, so `repost` sourcing never reuses the same post.
+- **`content/imgur_seen.json`** — flat list of previously-used Imgur post
+  IDs, so `repost` sourcing never reuses the same post. (`content/reddit_seen.json`
+  is dormant alongside `reddit_source.py`.)
 - **`publish.py`** — Graph API client. Image flow: `POST /{ig-id}/media`
   with `image_url` + caption → `POST /{ig-id}/media_publish` with the
   returned `creation_id`. Reel flow: `POST /{ig-id}/media` with
@@ -275,14 +282,16 @@ a routine can see" to "click approve, then mention it once in chat."
 ## Credentials & Secrets
 
 Required: `IG_ACCESS_TOKEN` (long-lived Graph API token), `IG_BUSINESS_ID`
-(the Instagram Business Account ID), `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET`
-(Reddit script-app credentials for `repost` sourcing), `ANTHROPIC_API_KEY`,
+(the Instagram Business Account ID), `IMGUR_CLIENT_ID` (free, self-registered
+Imgur app, no secret needed for anonymous public reads), `ANTHROPIC_API_KEY`,
 and a GitHub token with push access to the asset-hosting repo. All stored
 as environment variables / the scheduled agent's secret store — never
-hardcoded, never committed to the repo. Long-lived IG tokens expire
-(~60 days); the Publish agent must fail loudly and notify the user on auth
-failure rather than fail silently, since a silently dead token means an
-incomplete week appears successful but nothing actually posts.
+hardcoded, never committed to the repo. (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`
+are no longer required — `reddit_source.py` is dormant.) Long-lived IG
+tokens expire (~60 days); the Publish agent must fail loudly and notify
+the user on auth failure rather than fail silently, since a silently dead
+token means an incomplete week appears successful but nothing actually
+posts.
 
 ## Error Handling
 
@@ -290,8 +299,9 @@ incomplete week appears successful but nothing actually posts.
   the day rather than blocking the rest of the week's batch.
 - Imgflip/template render failure → skip that slot (falls back the same
   way as any other producer failure).
-- Reddit: no qualifying post found (NSFW/low-score/already-used exhausts
-  the fetched batch) or a fetch/merge failure → that slot falls back to
+- Imgur: no qualifying post found (NSFW/album/low-score/already-used
+  exhausts the fetched batch) or the gallery fetch/download itself fails
+  (bad client ID, rate limit, network error) → that slot falls back to
   `original` rather than failing the week's batch.
 - Graph API publish failure → log, leave `status=approved` (so the next
   Publish run retries it), never silently drop an approved item.
@@ -305,7 +315,7 @@ incomplete week appears successful but nothing actually posts.
   posting live.
 - `content/queue.json` schema validated on every read/write.
 - No automated test can safely post to the real account, hit the live
-  Pollinations/Imgflip/Reddit/Anthropic APIs, or perform a real `git push`
+  Pollinations/Imgflip/Imgur/Anthropic APIs, or perform a real `git push`
   — every external call is injected via a `session`/`runner`/`client`
   parameter and replaced with a fake in tests.
 - A manual smoke test (one real image post, verified in the app) is
@@ -316,7 +326,7 @@ incomplete week appears successful but nothing actually posts.
 
 Walkthroughs for: creating the Meta Developer App and generating a
 long-lived Instagram Graph API access token for the linked Business
-account (verifying `IG_BUSINESS_ID`), and creating a Reddit script app for
+account (verifying `IG_BUSINESS_ID`), and registering an Imgur app for
 `repost` sourcing. Covered in the implementation plan, not in this design
 doc's runtime architecture.
 
