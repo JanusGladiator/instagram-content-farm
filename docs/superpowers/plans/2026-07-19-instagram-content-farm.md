@@ -6,7 +6,7 @@
 
 **Architecture:** Two scheduled phases sharing a flat-file queue (`content/queue.json`). A weekly Generate routine creates 14 content items — each assigned a `source` (`original | template | repost`, repost restricted to post slots only) from a fixed rotation — and a review Artifact page. A daily Publish routine (fires twice: image at 12:00, reel at 20:00) posts whatever is approved for that day via the Instagram Graph API, identically regardless of source. See `docs/superpowers/specs/2026-07-19-instagram-content-farm-design.md` for the approved design.
 
-**Tech Stack:** Python 3.11+, `requests`, `anthropic` SDK, system `ffmpeg` binary, `pytest`, git/GitHub (public repo, raw-URL asset hosting), apileague.com Random Meme API (`X-API-Key` header), Imgflip public template API, Claude Code scheduled routines, Artifact `downloads` capability.
+**Tech Stack:** Python 3.11+, `requests`, system `ffmpeg` binary, `pytest`, git/GitHub (public repo, raw-URL asset hosting), apileague.com Random Meme API (`X-API-Key` header), Imgflip public template API, Claude Code scheduled routines (the Generate routine's own reasoning does caption/hashtag/meme-text writing — no `anthropic` SDK dependency), Artifact `downloads` capability.
 
 ## Global Constraints
 
@@ -15,12 +15,12 @@
 - Reel audio (for `original`/`template` sources) must be royalty-free (Pixabay Audio / YouTube Audio Library or equivalent) — never pulled from Instagram's in-app audio library (unreachable via API anyway). `repost` items are always post slots, never reels, so this doesn't apply to them.
 - `SOURCE_PLAN = ["repost","original","original","template","template","original","repost","template","original","original","template","template","repost","original"]` (14 entries, exact) — `repost` only ever lands on an even index (a post slot, per `source_for_slot`'s `day_index*2 + (0 if post else 1)` formula); posts are 3 repost/2 original/2 template, reels are 4 original/3 template. Do not rebalance without updating this plan.
 - `repost` has **no server-side NSFW filter** (the API exposes no such field) — content safety for this source relies entirely on the existing weekly human review step, not automated filtering. A `repost` meme whose `type` isn't `image/*` is rejected (marked seen, slot falls back to `original`) rather than posted with a wrong extension.
-- Text from an external `repost` source (`meme["description"]`) that reaches an LLM prompt (`captions.generate_caption`) must be explicitly delimited/framed as literal data, not instructions, in the prompt text — this is the first source in the pipeline where adversary-influenced text reaches a prompt directly.
+- No `ANTHROPIC_API_KEY`/Anthropic SDK dependency anywhere in `pipeline/` — the weekly Generate routine is itself a Claude Code agent, and writes every slot's caption/hashtags (plus top/bottom meme text for `template`-planned slots) itself as part of its own turn, following `pipeline/captions.py`'s guideline constants, then passes the result to `generate.generate_week(..., content_plan=...)`. `content_plan` must have an entry for **every** one of the 14 slots, including `repost`-planned ones (needed as their `original` fallback) — `generate_week` raises `KeyError` on a missing entry, by design, rather than silently skipping a slot. `repost` items' captions are the fetched meme's own description, not part of `content_plan` and not LLM-rewritten (unknown until runtime fetch; skipping the rewrite also removes that path's prompt-injection surface entirely rather than merely mitigating it).
 - `reddit_source.py` and `imgur_source.py` are dormant (both platforms closed API registration for this use case — see spec's "Repost Sourcing history"), fully tested, kept in the codebase; `generate.py` imports and calls neither.
-- Secrets (`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `APILEAGUE_API_KEY`, GitHub push credentials, `ANTHROPIC_API_KEY`) are environment variables only — never hardcoded, never committed. `.gitignore` already excludes `.env*`. (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`/`IMGUR_CLIENT_ID` are not used by the active pipeline.)
+- Secrets (`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `APILEAGUE_API_KEY`, GitHub push credentials) are environment variables only — never hardcoded, never committed. `.gitignore` already excludes `.env*`. (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`/`IMGUR_CLIENT_ID` are also not used by the active pipeline.)
 - `content/queue.json` is the single source of truth for what gets published; nothing auto-posts without `status == "approved"` on the correct `scheduled_date`. `publish.py` treats every source identically, active or dormant — it only ever reads `asset_url` and `caption`.
 - A `pending` item at its scheduled publish time is skipped and logged, never force-posted, never re-prompted.
-- No test may hit a live external API (Pollinations, Imgflip, apileague.com, Anthropic, Graph API) or perform a real `git push`/`ffmpeg` binary invocation — all external calls are injected via a `session`/`runner`/`client` parameter and replaced with fakes in tests.
+- No test may hit a live external API (Pollinations, Imgflip, apileague.com, Graph API) or perform a real `git push`/`ffmpeg` binary invocation — all external calls are injected via a `session`/`runner`/`client` parameter and replaced with fakes in tests.
 
 ---
 
@@ -2376,7 +2376,14 @@ Use it to create the scheduled cloud agents below — do not hand-write cron con
 
 - [ ] **Step 2: Create the weekly Generate routine**
 
-Cron: weekly, Sunday 07:00. Prompt instructs the agent to: run `generate.generate_week(...)` for the coming Mon–Sun with this repo's `repo_owner`/`repo_name`, then (re)publish the Task 14 review Artifact for the new week's `content/queue.json` (redeploy `review_page.html` to the same Artifact URL — same `file_path` keeps the URL stable), then send the user a push notification that the week's batch is ready for review.
+Cron: weekly, Sunday 07:00. The prompt for this routine must instruct the agent (itself, on that future run) to do all of the following, in order — this is the one routine that requires real reasoning, not just running a script:
+
+1. Read `pipeline/generate.py`'s `THEMES` and `SOURCE_PLAN`, and `pipeline/captions.py`'s `CAPTION_GUIDELINES`/`MEME_TEXT_GUIDELINES`.
+2. For each of the 14 slots (`slot_index` 0-13, `day_index = slot_index // 2`, post if `slot_index` is even else reel), write a caption + 5-10 hashtags per `CAPTION_GUIDELINES`, based on `THEMES[day_index % 7]` — do this for **every** slot, including `repost`-planned ones (their entry is the fallback used only if that slot's live fetch fails; it still must exist).
+3. For every `slot_index` where `SOURCE_PLAN[slot_index] == "template"`, additionally write top/bottom meme text per `MEME_TEXT_GUIDELINES`, based on the same theme.
+4. Assemble these into a `content_plan` dict (`{slot_index: {"caption": ..., "hashtags": [...], **({"top": ..., "bottom": ...} if template-planned else {})}}`) and call `generate.generate_week(..., content_plan=content_plan)` for the coming Mon–Sun with this repo's `repo_owner`/`repo_name`.
+5. (Re)publish the Task 14 review Artifact for the new week's `content/queue.json` (redeploy `review_page.html` to the same Artifact URL — same `file_path` keeps the URL stable).
+6. Send the user a push notification that the week's batch is ready for review.
 
 - [ ] **Step 3: Create the daily Publish routine — image, 12:00**
 
@@ -2388,7 +2395,7 @@ Same as Step 3 but `python -m pipeline.publish --type reel`.
 
 - [ ] **Step 5: Store secrets in the routines' secret configuration**
 
-`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `ANTHROPIC_API_KEY`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`, `APILEAGUE_API_KEY`, and git push credentials for the asset repo — per the loaded `schedule` skill's mechanism for routine secrets. Never in a committed file.
+`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`, `APILEAGUE_API_KEY`, and git push credentials for the asset repo — per the loaded `schedule` skill's mechanism for routine secrets. Never in a committed file. No `ANTHROPIC_API_KEY` needed (see Global Constraints).
 
 - [ ] **Step 6: Verify routines are listed**
 
@@ -2406,8 +2413,9 @@ This isn't a one-time build step but a standing operational instruction: wheneve
 
 - [ ] **Step 1: Dry-run the full generate → review → publish loop locally**
 
-```bash
-python -c "
+This step is run by the agent doing the smoke test (i.e., interactively, not a bare script — writing `content_plan` requires the same reasoning Task 15 Step 2 describes). Build a `content_plan` covering all 14 slots per that step's rules (theme-based caption+hashtags for every slot, top/bottom for template-planned ones), then:
+
+```python
 import os
 from datetime import date
 from pathlib import Path
@@ -2419,8 +2427,8 @@ generate.generate_week(
     repo_owner='<owner>', repo_name='<repo>', audio_path=Path('<royalty-free-audio.mp3>'),
     apileague_api_key=os.environ['APILEAGUE_API_KEY'],
     seen_path=Path('content/apileague_seen.json'),
+    content_plan=content_plan,  # the dict just written, all 14 slot_index keys present
 )
-"
 ```
 
 Expected: 14 new entries in `content/queue.json` (verify with a quick read that all three `source` values appear at least once across the week), 14 new asset files under `content/assets/`, all pushed to the public GitHub repo.
