@@ -2,25 +2,25 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Automated pipeline that generates a week of Instagram content (broad relatable/internet-culture humor, mixed across original AI-generated / meme-template / credited-free Reddit-repost sources, 1 post + 1 reel per day), lets the user approve the whole week in one sitting, then publishes autonomously via the official Meta Graph API with no further human interaction that week.
+**Goal:** Automated pipeline that generates a week of Instagram content (broad relatable/internet-culture humor, mixed across original AI-generated / meme-template / apileague.com-repost sources, 1 post + 1 reel per day), lets the user approve the whole week in one sitting, then publishes autonomously via the official Meta Graph API with no further human interaction that week.
 
-**Architecture:** Two scheduled phases sharing a flat-file queue (`content/queue.json`). A weekly Generate routine creates 14 content items — each assigned a `source` (`original | template | repost`) from a fixed ~5/5/4 weekly rotation — and a review Artifact page. A daily Publish routine (fires twice: image at 12:00, reel at 20:00) posts whatever is approved for that day via the Instagram Graph API, identically regardless of source. See `docs/superpowers/specs/2026-07-19-instagram-content-farm-design.md` for the approved design.
+**Architecture:** Two scheduled phases sharing a flat-file queue (`content/queue.json`). A weekly Generate routine creates 14 content items — each assigned a `source` (`original | template | repost`, repost restricted to post slots only) from a fixed rotation — and a review Artifact page. A daily Publish routine (fires twice: image at 12:00, reel at 20:00) posts whatever is approved for that day via the Instagram Graph API, identically regardless of source. See `docs/superpowers/specs/2026-07-19-instagram-content-farm-design.md` for the approved design.
 
-**Tech Stack:** Python 3.11+, `requests`, `anthropic` SDK, system `ffmpeg` binary, `pytest`, git/GitHub (public repo, raw-URL asset hosting), Reddit API (`client_credentials` OAuth), Imgflip public template API, Claude Code scheduled routines, Artifact state capability.
+**Tech Stack:** Python 3.11+, `requests`, `anthropic` SDK, system `ffmpeg` binary, `pytest`, git/GitHub (public repo, raw-URL asset hosting), apileague.com Random Meme API (`X-API-Key` header), Imgflip public template API, Claude Code scheduled routines, Artifact `downloads` capability.
 
 ## Global Constraints
 
 - Official Meta Graph API only — no unofficial/private IG API libraries, no browser automation (spec: "Hard Constraint: Official API Only").
-- `original` images via Pollinations.ai (free, no key). `template` blanks via Imgflip's public `get_memes` endpoint (free, no key). `repost` content via Reddit's official free API — no paid content-sourcing API for any source.
-- Reel audio (for `original`/`template` sources) must be royalty-free (Pixabay Audio / YouTube Audio Library or equivalent) — never pulled from Instagram's in-app audio library (unreachable via API anyway). `repost` reels use the source media's own audio/silence as-is, not the royalty-free track.
-- Every one of the 14 weekly slots (7 posts + 7 reels) has a `source` of `original`, `template`, or `repost`, assigned from the fixed rotation `SOURCE_PLAN = ["original","template","repost","original","template","repost","original","template","repost","original","template","repost","original","template"]` (5 original / 5 template / 4 repost) — exact list, do not rebalance without updating this plan.
-- Repost sourcing is **Imgur** (Task 17/18), not Reddit — Reddit's legacy Data API closed new-app registration to moderation-only use cases in late 2025 and is not viable for this project; `pipeline/reddit_source.py` stays in the codebase, fully tested, but unused. Imgur tags exactly `["memes", "funny", "wholesomememes", "me_irl", "relatable"]`, `MIN_SCORE = 500` (filters on the gallery item's `score` field, not `ups` — real Imgur gallery responses return `ups: null` and put the actual vote count under `score`; a null/missing `score` is treated as 0, never crashes the comparison), listing sort/window `"top"`/`"week"`, hard NSFW filter (`nsfw is False` exactly, not merely falsy), albums excluded, dedupe against `content/imgur_seen.json`.
-- Reposted content is never credited to the original poster — explicit user decision, recorded with its risk tradeoff in the spec's "Repost Legal Posture" section. Do not add attribution back in.
-- If a `repost` slot has no qualifying post available, it falls back to `original` for that slot rather than failing the week's batch — same resilience pattern as every other producer failure in this pipeline.
-- Secrets (`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `IMGUR_CLIENT_ID`, GitHub push credentials, `ANTHROPIC_API_KEY`) are environment variables only — never hardcoded, never committed. `.gitignore` already excludes `.env*`. (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` are no longer used by the active pipeline.)
-- `content/queue.json` is the single source of truth for what gets published; nothing auto-posts without `status == "approved"` on the correct `scheduled_date`. `publish.py` treats all three sources identically — it only ever reads `asset_url` and `caption`.
+- `original` images via Pollinations.ai (free, no key). `template` blanks via Imgflip's public `get_memes` endpoint (free, no key). `repost` via apileague.com's free-tier Random Meme API (`X-API-Key` header, 50 requests/day).
+- Reel audio (for `original`/`template` sources) must be royalty-free (Pixabay Audio / YouTube Audio Library or equivalent) — never pulled from Instagram's in-app audio library (unreachable via API anyway). `repost` items are always post slots, never reels, so this doesn't apply to them.
+- `SOURCE_PLAN = ["repost","original","original","template","template","original","repost","template","original","original","template","template","repost","original"]` (14 entries, exact) — `repost` only ever lands on an even index (a post slot, per `source_for_slot`'s `day_index*2 + (0 if post else 1)` formula); posts are 3 repost/2 original/2 template, reels are 4 original/3 template. Do not rebalance without updating this plan.
+- `repost` has **no server-side NSFW filter** (the API exposes no such field) — content safety for this source relies entirely on the existing weekly human review step, not automated filtering. A `repost` meme whose `type` isn't `image/*` is rejected (marked seen, slot falls back to `original`) rather than posted with a wrong extension.
+- Text from an external `repost` source (`meme["description"]`) that reaches an LLM prompt (`captions.generate_caption`) must be explicitly delimited/framed as literal data, not instructions, in the prompt text — this is the first source in the pipeline where adversary-influenced text reaches a prompt directly.
+- `reddit_source.py` and `imgur_source.py` are dormant (both platforms closed API registration for this use case — see spec's "Repost Sourcing history"), fully tested, kept in the codebase; `generate.py` imports and calls neither.
+- Secrets (`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `APILEAGUE_API_KEY`, GitHub push credentials, `ANTHROPIC_API_KEY`) are environment variables only — never hardcoded, never committed. `.gitignore` already excludes `.env*`. (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`/`IMGUR_CLIENT_ID` are not used by the active pipeline.)
+- `content/queue.json` is the single source of truth for what gets published; nothing auto-posts without `status == "approved"` on the correct `scheduled_date`. `publish.py` treats every source identically, active or dormant — it only ever reads `asset_url` and `caption`.
 - A `pending` item at its scheduled publish time is skipped and logged, never force-posted, never re-prompted.
-- No test may hit a live external API (Pollinations, Imgflip, Imgur, Anthropic, Graph API) or perform a real `git push`/`ffmpeg` binary invocation — all external calls are injected via a `session`/`runner`/`client` parameter and replaced with fakes in tests.
+- No test may hit a live external API (Pollinations, Imgflip, apileague.com, Anthropic, Graph API) or perform a real `git push`/`ffmpeg` binary invocation — all external calls are injected via a `session`/`runner`/`client` parameter and replaced with fakes in tests.
 
 ---
 
@@ -2388,7 +2388,7 @@ Same as Step 3 but `python -m pipeline.publish --type reel`.
 
 - [ ] **Step 5: Store secrets in the routines' secret configuration**
 
-`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `ANTHROPIC_API_KEY`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`, `IMGUR_CLIENT_ID`, and git push credentials for the asset repo — per the loaded `schedule` skill's mechanism for routine secrets. Never in a committed file.
+`IG_ACCESS_TOKEN`, `IG_BUSINESS_ID`, `ANTHROPIC_API_KEY`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`, `APILEAGUE_API_KEY`, and git push credentials for the asset repo — per the loaded `schedule` skill's mechanism for routine secrets. Never in a committed file.
 
 - [ ] **Step 6: Verify routines are listed**
 
@@ -2417,8 +2417,8 @@ generate.generate_week(
     start_date=date.today(), queue_path=Path('content/queue.json'),
     work_dir=Path('.work'), repo_root=Path('.'),
     repo_owner='<owner>', repo_name='<repo>', audio_path=Path('<royalty-free-audio.mp3>'),
-    imgur_client_id=os.environ['IMGUR_CLIENT_ID'],
-    seen_path=Path('content/imgur_seen.json'),
+    apileague_api_key=os.environ['APILEAGUE_API_KEY'],
+    seen_path=Path('content/apileague_seen.json'),
 )
 "
 ```

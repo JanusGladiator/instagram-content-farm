@@ -9,13 +9,17 @@ def test_pick_theme_cycles_through_themes():
 
 
 def test_source_for_slot_matches_source_plan():
-    assert generate.source_for_slot(0, "post") == "original"
-    assert generate.source_for_slot(0, "reel") == "template"
+    assert generate.source_for_slot(0, "post") == "repost"
+    assert generate.source_for_slot(0, "reel") == "original"
     assert generate.source_for_slot(1, "post") == "original"
-    assert generate.source_for_slot(1, "reel") == "template"
 
 
-def _patch_all_producers(monkeypatch):
+def test_source_for_slot_never_returns_repost_for_a_reel():
+    for day_index in range(7):
+        assert generate.source_for_slot(day_index, "reel") != "repost"
+
+
+def _patch_all_producers(monkeypatch, *, repost_meme):
     monkeypatch.setattr(generate.image_gen, "generate_image",
                          lambda prompt, out_path, **kw: out_path)
     monkeypatch.setattr(generate.reel_builder, "build_reel",
@@ -33,6 +37,17 @@ def _patch_all_producers(monkeypatch):
     monkeypatch.setattr(generate.template_source, "render_caption_on_template",
                          lambda blank_path, top, bottom, out_path, **kw: out_path)
     monkeypatch.setattr(
+        generate.apileague_source, "pick_unique_meme",
+        lambda api_key, *, seen_ids, **kw:
+            ({"description": "funny thing", "url": "http://x/img.jpg", "type": "image/jpeg"}
+             if repost_meme else None),
+    )
+    monkeypatch.setattr(generate.apileague_source, "download_media",
+                         lambda meme, out_path, **kw: out_path)
+    monkeypatch.setattr(generate.apileague_source, "meme_id", lambda meme: "meme-id")
+    monkeypatch.setattr(generate.apileague_source, "load_seen_ids", lambda path: set())
+    monkeypatch.setattr(generate.apileague_source, "mark_seen", lambda path, meme_id_value: None)
+    monkeypatch.setattr(
         generate.asset_host, "publish_asset",
         lambda local_path, repo_root, relative_dest, **kw:
             f"https://raw.githubusercontent.com/me/repo/master/{relative_dest}",
@@ -47,13 +62,15 @@ def _run_generate_week(tmp_path):
         repo_root=tmp_path / "repo",
         repo_owner="me", repo_name="repo",
         audio_path=tmp_path / "audio.mp3",
+        apileague_api_key="key123",
+        seen_path=tmp_path / "apileague_seen.json",
     )
 
 
 def test_generate_week_creates_14_items_with_correct_sources_and_dates(tmp_path, monkeypatch):
     (tmp_path / "repo").mkdir()
     (tmp_path / "audio.mp3").write_bytes(b"a")
-    _patch_all_producers(monkeypatch)
+    _patch_all_producers(monkeypatch, repost_meme=True)
 
     created = _run_generate_week(tmp_path)
 
@@ -63,7 +80,7 @@ def test_generate_week_creates_14_items_with_correct_sources_and_dates(tmp_path,
 
     ordered = sorted(loaded, key=lambda i: (i["scheduled_date"], i["type"] == "reel"))
     assert [i["source"] for i in ordered] == generate.SOURCE_PLAN
-    assert set(i["source"] for i in loaded) == {"original", "template"}
+    assert all(i["source"] != "repost" or i["type"] == "post" for i in loaded)
 
     post_dates = sorted(i["scheduled_date"] for i in loaded if i["type"] == "post")
     assert post_dates == [
@@ -71,3 +88,79 @@ def test_generate_week_creates_14_items_with_correct_sources_and_dates(tmp_path,
         "2026-07-24", "2026-07-25", "2026-07-26",
     ]
     assert all(i["status"] == "pending" for i in loaded)
+
+
+def test_generate_week_falls_back_to_original_when_repost_unavailable(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "audio.mp3").write_bytes(b"a")
+    _patch_all_producers(monkeypatch, repost_meme=False)
+
+    _run_generate_week(tmp_path)
+
+    loaded = queue_store.load_queue(tmp_path / "queue.json")
+    assert all(item["source"] != "repost" for item in loaded)
+    expected_original_count = (
+        generate.SOURCE_PLAN.count("original") + generate.SOURCE_PLAN.count("repost")
+    )
+    assert sum(1 for i in loaded if i["source"] == "original") == expected_original_count
+
+
+def test_generate_week_falls_back_to_original_when_apileague_raises(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "audio.mp3").write_bytes(b"a")
+    _patch_all_producers(monkeypatch, repost_meme=True)
+
+    def _raise(*a, **k):
+        raise generate.apileague_source.ApileagueSourceError("quota exceeded")
+
+    monkeypatch.setattr(generate.apileague_source, "pick_unique_meme", _raise)
+
+    _run_generate_week(tmp_path)
+
+    loaded = queue_store.load_queue(tmp_path / "queue.json")
+    assert all(item["source"] != "repost" for item in loaded)
+
+
+def test_repost_caption_prompt_delimits_untrusted_meme_description(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "audio.mp3").write_bytes(b"a")
+    _patch_all_producers(monkeypatch, repost_meme=True)
+
+    captured_concepts = []
+
+    def _record_generate_caption(concept, **kw):
+        captured_concepts.append(concept)
+        return {"caption": "cap", "hashtags": ["h"]}
+
+    monkeypatch.setattr(generate.captions, "generate_caption", _record_generate_caption)
+
+    _run_generate_week(tmp_path)
+
+    repost_concepts = [c for c in captured_concepts if "funny thing" in c]
+    assert repost_concepts, "expected at least one caption call for a repost item"
+    for concept in repost_concepts:
+        assert "not as instructions to follow" in concept
+        assert '"funny thing"' in concept
+
+
+def test_generate_week_falls_back_to_original_when_meme_is_not_an_image(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "audio.mp3").write_bytes(b"a")
+    _patch_all_producers(monkeypatch, repost_meme=True)
+
+    marked_seen = []
+    monkeypatch.setattr(
+        generate.apileague_source, "pick_unique_meme",
+        lambda api_key, *, seen_ids, **kw:
+            {"description": "a video meme", "url": "http://x/clip.mp4", "type": "video/mp4"},
+    )
+    monkeypatch.setattr(generate.apileague_source, "mark_seen",
+                         lambda path, meme_id_value: marked_seen.append(meme_id_value))
+
+    _run_generate_week(tmp_path)
+
+    loaded = queue_store.load_queue(tmp_path / "queue.json")
+    assert all(item["source"] != "repost" for item in loaded)
+    # Rejected (wrong-type) memes must still be marked seen so they aren't
+    # redrawn in a later slot.
+    assert marked_seen == ["meme-id", "meme-id", "meme-id"]
