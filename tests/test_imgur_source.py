@@ -1,5 +1,6 @@
 from pathlib import Path
 import pytest
+import requests
 from pipeline import imgur_source
 
 
@@ -23,6 +24,21 @@ class FakeSession:
         return self.responses.pop(0)
 
 
+class RaisingSession:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def get(self, url, **kwargs):
+        raise self._exc
+
+
+class BadJsonResponse:
+    status_code = 200
+
+    def json(self):
+        raise ValueError("not valid json")
+
+
 def test_fetch_tag_gallery_returns_data_list_on_success():
     body = {"data": [{"id": "a"}, {"id": "b"}], "success": True, "status": 200}
     session = FakeSession([FakeResponse(200, body=body)])
@@ -40,6 +56,20 @@ def test_fetch_tag_gallery_raises_on_error_status():
 
     with pytest.raises(imgur_source.ImgurSourceError):
         imgur_source.fetch_tag_gallery("memes", "bad-client", session=session)
+
+
+def test_fetch_tag_gallery_wraps_network_error_as_imgur_source_error():
+    session = RaisingSession(requests.exceptions.ConnectionError("network down"))
+
+    with pytest.raises(imgur_source.ImgurSourceError):
+        imgur_source.fetch_tag_gallery("memes", "client123", session=session)
+
+
+def test_fetch_tag_gallery_wraps_bad_json_as_imgur_source_error():
+    session = FakeSession([BadJsonResponse()])
+
+    with pytest.raises(imgur_source.ImgurSourceError):
+        imgur_source.fetch_tag_gallery("memes", "client123", session=session)
 
 
 def _post(id_, *, score=1000, nsfw=False, is_album=False, animated=False):
@@ -103,6 +133,15 @@ def test_download_media_writes_file(tmp_path):
 
 def test_download_media_raises_on_failure(tmp_path):
     session = FakeSession([FakeResponse(404)])
+
+    with pytest.raises(imgur_source.ImgurSourceError):
+        imgur_source.download_media(
+            {"id": "a", "link": "http://x/a.jpg"}, tmp_path / "post.jpg", session=session,
+        )
+
+
+def test_download_media_wraps_network_error_as_imgur_source_error(tmp_path):
+    session = RaisingSession(requests.exceptions.Timeout("timed out"))
 
     with pytest.raises(imgur_source.ImgurSourceError):
         imgur_source.download_media(

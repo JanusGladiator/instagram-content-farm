@@ -13,12 +13,15 @@ class ImgurSourceError(RuntimeError):
 def fetch_tag_gallery(tag: str, client_id: str, *, sort: str = "top",
                        window: str = "week", page: int = 0, session=None) -> list[dict]:
     session = session or requests.Session()
-    response = session.get(
-        f"{IMGUR_API_BASE}/gallery/t/{tag}/{sort}/{window}/{page}",
-        headers={"Authorization": f"Client-ID {client_id}"},
-        timeout=30,
-    )
-    body = response.json()
+    try:
+        response = session.get(
+            f"{IMGUR_API_BASE}/gallery/t/{tag}/{sort}/{window}/{page}",
+            headers={"Authorization": f"Client-ID {client_id}"},
+            timeout=30,
+        )
+        body = response.json()
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        raise ImgurSourceError(f"imgur gallery fetch failed for tag={tag!r}: {exc}") from exc
     if response.status_code != 200 or not body.get("success"):
         raise ImgurSourceError(f"imgur gallery fetch failed for tag={tag!r}: {body}")
     return body["data"]
@@ -45,7 +48,10 @@ def pick_post(posts: list[dict], *, media_kind: str, min_score: int,
 
 def download_media(post: dict, out_path: Path, *, session=None) -> Path:
     session = session or requests.Session()
-    response = session.get(post["link"], timeout=60)
+    try:
+        response = session.get(post["link"], timeout=60)
+    except requests.exceptions.RequestException as exc:
+        raise ImgurSourceError(f"failed to download media for post {post['id']}: {exc}") from exc
     if response.status_code != 200:
         raise ImgurSourceError(
             f"failed to download media for post {post['id']}: status {response.status_code}"
