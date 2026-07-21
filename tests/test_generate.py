@@ -39,7 +39,7 @@ def _patch_all_producers(monkeypatch, *, repost_post):
     monkeypatch.setattr(generate.imgur_source, "load_seen_ids", lambda path: set())
     monkeypatch.setattr(
         generate.imgur_source, "pick_post",
-        lambda posts, *, media_kind, min_ups, seen_ids: (posts[0] if repost_post else None),
+        lambda posts, *, media_kind, min_score, seen_ids: (posts[0] if repost_post else None),
     )
     monkeypatch.setattr(generate.imgur_source, "download_media",
                          lambda post, out_path, **kw: out_path)

@@ -24,7 +24,7 @@ def fetch_tag_gallery(tag: str, client_id: str, *, sort: str = "top",
     return body["data"]
 
 
-def pick_post(posts: list[dict], *, media_kind: str, min_ups: int,
+def pick_post(posts: list[dict], *, media_kind: str, min_score: int,
               seen_ids: set[str]) -> dict | None:
     for post in posts:
         if post["id"] in seen_ids:
@@ -33,7 +33,7 @@ def pick_post(posts: list[dict], *, media_kind: str, min_ups: int,
             continue
         if post.get("nsfw") is not False:
             continue
-        if post.get("ups", 0) < min_ups:
+        if (post.get("score") or 0) < min_score:
             continue
         is_video = bool(post.get("animated"))
         if media_kind == "image" and not is_video:

@@ -24,7 +24,7 @@ THEMES = [
 REEL_SHOT_VARIANTS = ("setup shot", "punchline reaction shot")
 
 IMGUR_TAGS = ["memes", "funny", "wholesomememes", "me_irl", "relatable"]
-MIN_UPS = 500
+MIN_SCORE = 500
 
 # 14 slots = 7 days x (post, reel). 5 original / 5 template / 4 repost.
 SOURCE_PLAN = [
@@ -92,7 +92,7 @@ def _produce_repost(*, slot_type: str, work_dir: Path, day_label: str, tag: str,
     seen_ids = imgur_source.load_seen_ids(seen_path)
     media_kind = "image" if slot_type == "post" else "video"
     post = imgur_source.pick_post(posts, media_kind=media_kind,
-                                   min_ups=MIN_UPS, seen_ids=seen_ids)
+                                   min_score=MIN_SCORE, seen_ids=seen_ids)
     if post is None:
         return None
 

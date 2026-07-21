@@ -42,43 +42,52 @@ def test_fetch_tag_gallery_raises_on_error_status():
         imgur_source.fetch_tag_gallery("memes", "bad-client", session=session)
 
 
-def _post(id_, *, ups=1000, nsfw=False, is_album=False, animated=False):
-    return {"id": id_, "ups": ups, "nsfw": nsfw, "is_album": is_album, "animated": animated}
+def _post(id_, *, score=1000, nsfw=False, is_album=False, animated=False):
+    return {"id": id_, "score": score, "nsfw": nsfw, "is_album": is_album, "animated": animated}
 
 
 def test_pick_post_skips_seen_ids():
     posts = [_post("a"), _post("b")]
-    result = imgur_source.pick_post(posts, media_kind="image", min_ups=0, seen_ids={"a"})
+    result = imgur_source.pick_post(posts, media_kind="image", min_score=0, seen_ids={"a"})
     assert result["id"] == "b"
 
 
 def test_pick_post_skips_nsfw_unless_explicitly_false():
     posts = [_post("a", nsfw=True), _post("b", nsfw=None), _post("c", nsfw=False)]
-    result = imgur_source.pick_post(posts, media_kind="image", min_ups=0, seen_ids=set())
+    result = imgur_source.pick_post(posts, media_kind="image", min_score=0, seen_ids=set())
     assert result["id"] == "c"
 
 
 def test_pick_post_skips_albums():
     posts = [_post("a", is_album=True), _post("b")]
-    result = imgur_source.pick_post(posts, media_kind="image", min_ups=0, seen_ids=set())
+    result = imgur_source.pick_post(posts, media_kind="image", min_score=0, seen_ids=set())
     assert result["id"] == "b"
 
 
-def test_pick_post_skips_below_min_ups():
-    posts = [_post("a", ups=10), _post("b", ups=1000)]
-    result = imgur_source.pick_post(posts, media_kind="image", min_ups=500, seen_ids=set())
+def test_pick_post_skips_below_min_score():
+    posts = [_post("a", score=10), _post("b", score=1000)]
+    result = imgur_source.pick_post(posts, media_kind="image", min_score=500, seen_ids=set())
+    assert result["id"] == "b"
+
+
+def test_pick_post_treats_null_score_as_zero():
+    # Real Imgur gallery responses return "ups": null with the actual vote
+    # count under "score" instead — a post with score=None must be treated
+    # as 0, not crash the comparison against min_score.
+    posts = [_post("a", score=None), _post("b", score=1000)]
+    result = imgur_source.pick_post(posts, media_kind="image", min_score=500, seen_ids=set())
     assert result["id"] == "b"
 
 
 def test_pick_post_filters_by_media_kind_video():
     posts = [_post("a", animated=False), _post("b", animated=True)]
-    result = imgur_source.pick_post(posts, media_kind="video", min_ups=0, seen_ids=set())
+    result = imgur_source.pick_post(posts, media_kind="video", min_score=0, seen_ids=set())
     assert result["id"] == "b"
 
 
 def test_pick_post_returns_none_when_no_match():
-    posts = [_post("a", ups=0)]
-    result = imgur_source.pick_post(posts, media_kind="image", min_ups=500, seen_ids=set())
+    posts = [_post("a", score=0)]
+    result = imgur_source.pick_post(posts, media_kind="image", min_score=500, seen_ids=set())
     assert result is None
 
 
