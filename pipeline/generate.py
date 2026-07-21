@@ -5,8 +5,8 @@ from pipeline import (
     asset_host,
     captions,
     image_gen,
+    imgur_source,
     queue_store,
-    reddit_source,
     reel_builder,
     template_source,
 )
@@ -23,8 +23,8 @@ THEMES = [
 
 REEL_SHOT_VARIANTS = ("setup shot", "punchline reaction shot")
 
-SUBREDDITS = ["memes", "funny", "wholesomememes", "AdviceAnimals", "mildlyinteresting"]
-MIN_UPVOTES = 500
+IMGUR_TAGS = ["memes", "funny", "wholesomememes", "me_irl", "relatable"]
+MIN_UPS = 500
 
 # 14 slots = 7 days x (post, reel). 5 original / 5 template / 4 repost.
 SOURCE_PLAN = [
@@ -86,13 +86,13 @@ def _produce_template(*, slot_type: str, theme: str, work_dir: Path, day_label: 
     return reel_video, caption
 
 
-def _produce_repost(*, slot_type: str, work_dir: Path, day_label: str, subreddit: str,
-                     access_token: str, user_agent: str, seen_path: Path) -> tuple[Path, dict] | None:
-    posts = reddit_source.fetch_top_posts(subreddit, access_token, user_agent)
-    seen_ids = reddit_source.load_seen_ids(seen_path)
+def _produce_repost(*, slot_type: str, work_dir: Path, day_label: str, tag: str,
+                     imgur_client_id: str, seen_path: Path) -> tuple[Path, dict] | None:
+    posts = imgur_source.fetch_tag_gallery(tag, imgur_client_id)
+    seen_ids = imgur_source.load_seen_ids(seen_path)
     media_kind = "image" if slot_type == "post" else "video"
-    post = reddit_source.pick_post(posts, media_kind=media_kind,
-                                    min_upvotes=MIN_UPVOTES, seen_ids=seen_ids)
+    post = imgur_source.pick_post(posts, media_kind=media_kind,
+                                   min_ups=MIN_UPS, seen_ids=seen_ids)
     if post is None:
         return None
 
@@ -103,35 +103,26 @@ def _produce_repost(*, slot_type: str, work_dir: Path, day_label: str, subreddit
 
     if slot_type == "post":
         asset_path = work_dir / f"{day_label}-post-repost.jpg"
-        reddit_source.download_image_post(post, asset_path)
     else:
         asset_path = work_dir / f"{day_label}-reel-repost.mp4"
-        reddit_source.download_video_post(post, asset_path)
+    imgur_source.download_media(post, asset_path)
 
-    reddit_source.mark_seen(seen_path, post["id"])
+    imgur_source.mark_seen(seen_path, post["id"])
     return asset_path, caption
 
 
 def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
                    repo_root: Path, repo_owner: str, repo_name: str,
-                   audio_path: Path, reddit_client_id: str, reddit_client_secret: str,
-                   reddit_user_agent: str, seen_path: Path) -> list[dict]:
+                   audio_path: Path, imgur_client_id: str, seen_path: Path) -> list[dict]:
     work_dir.mkdir(parents=True, exist_ok=True)
     created = []
     templates = template_source.list_templates()
-
-    try:
-        reddit_access_token = reddit_source.get_access_token(
-            reddit_client_id, reddit_client_secret, reddit_user_agent,
-        )
-    except reddit_source.RedditSourceError:
-        reddit_access_token = None
 
     for offset in range(7):
         day = start_date + timedelta(days=offset)
         day_label = day.isoformat()
         theme = pick_theme(offset)
-        subreddit = SUBREDDITS[offset % len(SUBREDDITS)]
+        tag = IMGUR_TAGS[offset % len(IMGUR_TAGS)]
 
         for slot_type in ("post", "reel"):
             source = source_for_slot(offset, slot_type)
@@ -144,17 +135,13 @@ def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
                     templates=templates, day_index=offset,
                 )
             elif source == "repost":
-                if reddit_access_token is None:
+                try:
+                    result = _produce_repost(
+                        slot_type=slot_type, work_dir=work_dir, day_label=day_label,
+                        tag=tag, imgur_client_id=imgur_client_id, seen_path=seen_path,
+                    )
+                except imgur_source.ImgurSourceError:
                     result = None
-                else:
-                    try:
-                        result = _produce_repost(
-                            slot_type=slot_type, work_dir=work_dir, day_label=day_label,
-                            subreddit=subreddit, access_token=reddit_access_token,
-                            user_agent=reddit_user_agent, seen_path=seen_path,
-                        )
-                    except reddit_source.RedditSourceError:
-                        result = None
                 if result is None:
                     source = "original"
 
