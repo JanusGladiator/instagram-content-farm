@@ -166,7 +166,7 @@ def generate_week(*, start_date: date, queue_path: Path, work_dir: Path,
 
         for slot_type in ("post", "reel"):
             slot_index = offset * 2 + (0 if slot_type == "post" else 1)
-            source = source_for_slot(offset, slot_type)
+            source = SOURCE_PLAN[slot_index]
 
             if source == "template":
                 content = content_plan[slot_index]

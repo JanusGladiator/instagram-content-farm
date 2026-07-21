@@ -209,7 +209,7 @@ def test_repost_asset_extension_matches_real_meme_content_type(tmp_path, monkeyp
     assert all(i["asset_url"].endswith(".png") for i in repost_items)
 
 
-def test_generate_week_raises_key_error_if_content_plan_missing_a_slot(tmp_path, monkeypatch):
+def test_generate_week_raises_key_error_if_content_plan_missing_a_directly_planned_slot(tmp_path, monkeypatch):
     (tmp_path / "repo").mkdir()
     (tmp_path / "audio.mp3").write_bytes(b"a")
     _patch_all_producers(monkeypatch, repost_meme=False)
@@ -220,5 +220,23 @@ def test_generate_week_raises_key_error_if_content_plan_missing_a_slot(tmp_path,
     try:
         _run_generate_week(tmp_path, content_plan=incomplete_plan)
         assert False, "expected KeyError for a content_plan missing a required slot"
+    except KeyError:
+        pass
+
+
+def test_generate_week_raises_key_error_if_content_plan_missing_a_repost_fallback_slot(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "audio.mp3").write_bytes(b"a")
+    # Force the repost slot to fail so it needs its content_plan entry as
+    # an `original` fallback -- this is the actual scenario the "every
+    # slot including repost-planned ones" requirement exists to cover.
+    _patch_all_producers(monkeypatch, repost_meme=False)
+
+    incomplete_plan = _build_content_plan()
+    del incomplete_plan[0]  # slot 0 (day 0 post) is "repost" per SOURCE_PLAN
+
+    try:
+        _run_generate_week(tmp_path, content_plan=incomplete_plan)
+        assert False, "expected KeyError when the repost-planned slot's fallback entry is missing"
     except KeyError:
         pass
