@@ -166,19 +166,27 @@ crediting.
 ## Architecture
 
 ```
-[Generate agent — weekly, e.g. Sun 07:00]
-  → for each of the next 7 days, for post and reel (14 slots total):
-      → look up this slot's source (original | template | repost — repost
-        only ever assigned to post slots) from a fixed weekly rotation
-      → produce the local asset + caption for that source:
-          original → Pollinations.ai image(s) (+ ffmpeg reel composite)
-          template → Imgflip blank template + Claude top/bottom text,
-                      rendered via ffmpeg (+ ffmpeg reel composite)
+[Generate agent — weekly, e.g. Sun 07:00 — this is Claude itself, running
+ as a scheduled Claude Code agent]
+  → reads pipeline/generate.py's THEMES/SOURCE_PLAN and pipeline/captions.py's
+    guidelines, then writes the week's content_plan itself: a caption +
+    hashtags for every one of the 14 slots (including repost-planned ones,
+    needed as their fallback), plus top/bottom meme text for every
+    template-planned slot — this is the agent's own turn, not a separate
+    API call (see "Why no Anthropic API call" below)
+  → calls generate.generate_week(..., content_plan=<what it just wrote>),
+    which for each of the 14 slots:
+      → produces the local asset for that slot's source:
+          original → Pollinations.ai image(s) (+ ffmpeg reel composite),
+                      captioned from content_plan
+          template → Imgflip blank template + the agent's own top/bottom
+                      text, rendered via ffmpeg (+ ffmpeg reel composite)
           repost   → apileague.com random meme (post slots only), used
-                      directly as the asset, no reel composite step
+                      directly as the asset — caption is the meme's own
+                      description, not from content_plan or an LLM rewrite
         each producer degrades independently on failure (retry, then skip
-        that slot or fall back to original for repost) — never blocks
-        the rest of the week's batch
+        that slot or fall back to original for repost, using that slot's
+        content_plan entry) — never blocks the rest of the week's batch
       → asset pushed to a public GitHub repo (raw URL used as the public
         host Graph API requires — see "Asset Hosting")
       → new entry appended to content/queue.json
@@ -207,6 +215,25 @@ crediting.
     hasn't happened yet, or the item was left unreviewed): skip it,
     log it, do NOT auto-post it, and do NOT re-prompt the user
 ```
+
+### Why no Anthropic API call
+
+The original design had `pipeline/captions.py` call the Anthropic API
+directly for caption/hashtag/meme-text generation, requiring its own
+`ANTHROPIC_API_KEY`. Revised 2026-07-21, per explicit user direction to
+avoid a separate ongoing cost: the weekly Generate routine is *already* a
+scheduled Claude Code agent, so the same LLM capability is available for
+free (covered by the existing subscription) as part of that agent's own
+turn — there's no reason to also pay per-token for a redundant API call
+from inside the Python script for the identical capability. `captions.py`
+is now just guideline text the agent reads; it assembles the actual
+caption/hashtag/meme-text content itself and passes it into
+`generate_week` as `content_plan`. The one exception is `repost` captions:
+since the meme's content isn't known until the runtime fetch, it can't be
+pre-written, and looping back to the agent mid-script for just that one
+rewrite wasn't worth the complexity — the meme's own description is used
+directly, with a side benefit of removing that path's prompt-injection
+surface entirely rather than just mitigating it.
 
 ### Why not automatic approval sync
 
@@ -242,10 +269,11 @@ a routine can see" to "click approve, then mention it once in chat."
 
 - **`generate.py`** — weekly content orchestrator. For each of the 14
   weekly slots, dispatches to the right source producer (Pollinations,
-  Imgflip+ffmpeg, or apileague.com), calls Claude for captions, pushes
-  assets to the asset-hosting repo, writes `content/queue.json` entries,
-  triggers the Artifact review page rebuild. Does not import or call
-  `imgur_source.py` or `reddit_source.py`.
+  Imgflip+ffmpeg, or apileague.com), pushes assets to the asset-hosting
+  repo, writes `content/queue.json` entries, triggers the Artifact review
+  page rebuild. Does not import or call `imgur_source.py` or
+  `reddit_source.py`, and makes no LLM API calls of its own — captions
+  come in via `content_plan` (see `captions.py` below).
 - **`image_gen.py`** — Pollinations.ai client for `original` images.
 - **`reel_builder.py`** — `ffmpeg` quick-cut reel composer, used by
   `original` and `template` sources (not `repost`, which uses the fetched
@@ -260,8 +288,21 @@ a routine can see" to "click approve, then mention it once in chat."
   "Repost Sourcing history" for why). Both fully implemented, tested,
   and reviewed; kept in the codebase in case a platform reopens this path.
   `generate.py` calls neither.
-- **`captions.py`** — Claude-backed caption/hashtag generation (all
-  sources) and meme top/bottom text generation (`template` source only).
+- **`captions.py`** — **not an API client.** As of 2026-07-21, this is two
+  plain guideline text constants (`CAPTION_GUIDELINES`, `MEME_TEXT_GUIDELINES`)
+  with no functions and no network calls. The weekly Generate routine is
+  itself a scheduled Claude Code agent (see "Two scheduled routines"
+  below) — caption/hashtag/meme-text writing happens as part of that
+  agent's own turn, reading these constants for guidance, rather than via
+  a separately-billed Anthropic API call from inside the Python script.
+  The agent assembles a `content_plan` dict (one entry per weekly slot;
+  entries where the slot is `template`-planned also carry meme top/bottom
+  text) and passes it into `generate.generate_week(..., content_plan=...)`.
+  `repost` items are the one exception: their caption is the fetched
+  meme's own description, used as-is (no LLM rewrite — the content isn't
+  known until the runtime fetch, so it can't be pre-written, and skipping
+  the rewrite avoids reintroducing a prompt-injection surface for no real
+  benefit).
 - **`content/queue.json`** — flat-file queue. One record per content item:
   ```json
   {
@@ -315,15 +356,18 @@ a routine can see" to "click approve, then mention it once in chat."
 
 Required: `IG_ACCESS_TOKEN` (long-lived Graph API token), `IG_BUSINESS_ID`
 (the Instagram Business Account ID), `APILEAGUE_API_KEY` (free tier, for
-`repost` sourcing), `ANTHROPIC_API_KEY`, and a GitHub token with push
-access to the asset-hosting repo. All stored as environment variables /
-the scheduled agent's secret store — never hardcoded, never committed to
-the repo. (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`/`IMGUR_CLIENT_ID` are
-not required — both those source modules are dormant.) Long-lived IG
-tokens expire (~60 days); the Publish agent must fail loudly and notify
-the user on auth failure rather than fail silently, since a silently dead
-token means an incomplete week appears successful but nothing actually
-posts.
+`repost` sourcing), and a GitHub token with push access to the
+asset-hosting repo. All stored as environment variables / the scheduled
+agent's secret store — never hardcoded, never committed to the repo. No
+`ANTHROPIC_API_KEY` is needed — the weekly Generate routine is itself a
+Claude Code agent, so caption/hashtag/meme-text generation happens as
+part of that agent's own turn (covered by the existing subscription)
+rather than a separately-billed API call; see `captions.py`. (`REDDIT_CLIENT_ID`/
+`REDDIT_CLIENT_SECRET`/`IMGUR_CLIENT_ID` are also not required — both
+those source modules are dormant.) Long-lived IG tokens expire (~60 days);
+the Publish agent must fail loudly and notify the user on auth failure
+rather than fail silently, since a silently dead token means an
+incomplete week appears successful but nothing actually posts.
 
 ## Error Handling
 
@@ -347,9 +391,9 @@ posts.
   posting live.
 - `content/queue.json` schema validated on every read/write.
 - No automated test can safely post to the real account, hit the live
-  Pollinations/Imgflip/apileague.com/Anthropic APIs, or perform a real
-  `git push` — every external call is injected via a `session`/`runner`/
-  `client` parameter and replaced with a fake in tests.
+  Pollinations/Imgflip/apileague.com APIs, or perform a real `git push` —
+  every external call is injected via a `session`/`runner`/`client`
+  parameter and replaced with a fake in tests.
 - A manual smoke test (one real image post, verified in the app) is
   required before the pipeline is trusted to run unattended for a full
   week.
