@@ -1,0 +1,486 @@
+<title>Weekly Content Review</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --surface: #ffffff;
+    --surface-sunken: #eeece7;
+    --border: #dedad2;
+    --text: #211f1c;
+    --text-muted: #6f6a61;
+    --accent: #5b4cff;
+    --accent-contrast: #ffffff;
+    --accent-soft: #ece9ff;
+    --good: #1a8a4a;
+    --good-soft: #e3f5ea;
+    --bad: #c8443a;
+    --bad-soft: #fbe9e7;
+    --pending-soft: #efece4;
+    --shadow: 0 1px 2px rgba(30, 26, 14, 0.06), 0 8px 24px -12px rgba(30, 26, 14, 0.18);
+    --radius: 14px;
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131318;
+      --surface: #1c1c23;
+      --surface-sunken: #17171d;
+      --border: #302f38;
+      --text: #ece9e2;
+      --text-muted: #9793a3;
+      --accent: #8b7cff;
+      --accent-contrast: #10101a;
+      --accent-soft: #262247;
+      --good: #4fce8c;
+      --good-soft: #163326;
+      --bad: #f0796e;
+      --bad-soft: #3a1e1c;
+      --pending-soft: #24242c;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px -14px rgba(0, 0, 0, 0.6);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #131318;
+    --surface: #1c1c23;
+    --surface-sunken: #17171d;
+    --border: #302f38;
+    --text: #ece9e2;
+    --text-muted: #9793a3;
+    --accent: #8b7cff;
+    --accent-contrast: #10101a;
+    --accent-soft: #262247;
+    --good: #4fce8c;
+    --good-soft: #163326;
+    --bad: #f0796e;
+    --bad-soft: #3a1e1c;
+    --pending-soft: #24242c;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f5f2;
+    --surface: #ffffff;
+    --surface-sunken: #eeece7;
+    --border: #dedad2;
+    --text: #211f1c;
+    --text-muted: #6f6a61;
+    --accent: #5b4cff;
+    --accent-contrast: #ffffff;
+    --accent-soft: #ece9ff;
+    --good: #1a8a4a;
+    --good-soft: #e3f5ea;
+    --bad: #c8443a;
+    --bad-soft: #fbe9e7;
+    --pending-soft: #efece4;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Inter", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body { min-height: 100vh; padding-bottom: 4rem; }
+
+  h1, h2, h3 { text-wrap: balance; font-family: inherit; }
+
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    padding: 1.1rem clamp(1rem, 4vw, 2.5rem);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1rem 1.5rem;
+    justify-content: space-between;
+  }
+  .brand { display: flex; flex-direction: column; gap: 0.15rem; }
+  .brand .eyebrow {
+    font-size: 0.7rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .brand h1 { font-size: 1.15rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+
+  .stats { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+  .stat-chip {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    padding: 0.4rem 0.7rem;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+  .stat-chip b {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.95rem;
+    color: var(--text);
+  }
+  .stat-chip.approved b { color: var(--good); }
+  .stat-chip.rejected b { color: var(--bad); }
+
+  .export-btn {
+    appearance: none;
+    border: none;
+    background: var(--accent);
+    color: var(--accent-contrast);
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.85rem;
+    padding: 0.6rem 1.1rem;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: opacity 0.15s ease, transform 0.1s ease;
+  }
+  .export-btn:hover { opacity: 0.9; }
+  .export-btn:active { transform: scale(0.98); }
+  .export-btn:disabled { opacity: 0.45; cursor: default; }
+  .export-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  main { max-width: 1180px; margin: 0 auto; padding: 1.75rem clamp(1rem, 4vw, 2.5rem) 0; }
+
+  #status-line {
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    margin: 0 0 1.25rem;
+  }
+  #status-line.error { color: var(--bad); }
+
+  .day-section { margin-bottom: 2.25rem; }
+  .day-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    margin-bottom: 0.85rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .day-header h2 { font-size: 1.05rem; font-weight: 700; margin: 0; }
+  .day-header .day-date { font-size: 0.82rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+  .card-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .media-wrap {
+    position: relative;
+    aspect-ratio: 4 / 5;
+    background: var(--surface-sunken);
+  }
+  .media-wrap img, .media-wrap video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    background: #000;
+  }
+  .badge-row {
+    position: absolute;
+    top: 0.6rem;
+    left: 0.6rem;
+    right: 0.6rem;
+    display: flex;
+    justify-content: space-between;
+    gap: 0.4rem;
+    pointer-events: none;
+  }
+  .type-badge, .source-badge {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    background: rgba(10, 9, 6, 0.62);
+    color: #fff;
+    backdrop-filter: blur(3px);
+  }
+
+  .card-body { padding: 0.9rem 1rem 1rem; display: flex; flex-direction: column; gap: 0.6rem; flex: 1; }
+  .caption { font-size: 0.92rem; line-height: 1.4; margin: 0; }
+  .hashtags { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .hashtag {
+    font-size: 0.72rem;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+  }
+
+  .card-footer { margin-top: auto; display: flex; align-items: center; gap: 0.5rem; }
+  .status-pill {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.3rem 0.6rem;
+    border-radius: 999px;
+    background: var(--pending-soft);
+    color: var(--text-muted);
+  }
+  .status-pill.approved { background: var(--good-soft); color: var(--good); }
+  .status-pill.rejected { background: var(--bad-soft); color: var(--bad); }
+
+  .decision-btns { display: flex; gap: 0.4rem; margin-left: auto; }
+  .decision-btns button {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.35rem 0.65rem;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  }
+  .decision-btns button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .decision-btns .approve-btn.active { background: var(--good); border-color: var(--good); color: #fff; }
+  .decision-btns .reject-btn.active { background: var(--bad); border-color: var(--bad); color: #fff; }
+  .decision-btns button:not(.active):hover { background: var(--surface-sunken); }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 1.5rem;
+    transform: translateX(-50%) translateY(0);
+    background: var(--text);
+    color: var(--bg);
+    padding: 0.6rem 1.1rem;
+    border-radius: 10px;
+    font-size: 0.85rem;
+    box-shadow: var(--shadow);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    z-index: 50;
+    max-width: 90vw;
+    text-align: center;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(-6px); }
+
+  .empty-state, .load-state {
+    padding: 3rem 1rem;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+  }
+</style>
+
+<div class="topbar">
+  <div class="brand">
+    <span class="eyebrow">Instagram content farm</span>
+    <h1>Weekly queue review</h1>
+  </div>
+  <div class="stats" id="stats" aria-live="polite"></div>
+  <button class="export-btn" id="export-btn" disabled>Export decisions</button>
+</div>
+
+<main>
+  <p id="status-line">Loading queue.json from GitHub…</p>
+  <div id="content"></div>
+</main>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+  const QUEUE_URL = "https://raw.githubusercontent.com/JanusGladiator/instagram-content-farm/master/content/queue.json";
+
+  const statusLine = document.getElementById("status-line");
+  const contentEl = document.getElementById("content");
+  const statsEl = document.getElementById("stats");
+  const exportBtn = document.getElementById("export-btn");
+  const toastEl = document.getElementById("toast");
+
+  let queue = [];
+  const decisions = {};
+
+  function showToast(message) {
+    toastEl.textContent = message;
+    toastEl.classList.add("show");
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => toastEl.classList.remove("show"), 3200);
+  }
+
+  function statusOf(item) {
+    return decisions[item.id] ?? item.status;
+  }
+
+  function formatDayHeading(dateStr) {
+    const d = new Date(dateStr + "T00:00:00");
+    const weekday = d.toLocaleDateString(undefined, { weekday: "long" });
+    const rest = d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+    return { weekday, rest };
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  function renderStats() {
+    const counts = { pending: 0, approved: 0, rejected: 0 };
+    for (const item of queue) {
+      const s = statusOf(item);
+      if (s === "approved") counts.approved++;
+      else if (s === "rejected") counts.rejected++;
+      else counts.pending++;
+    }
+    statsEl.innerHTML = `
+      <span class="stat-chip"><b>${queue.length}</b>&nbsp;items</span>
+      <span class="stat-chip"><b>${counts.pending}</b>&nbsp;pending</span>
+      <span class="stat-chip approved"><b>${counts.approved}</b>&nbsp;approved</span>
+      <span class="stat-chip rejected"><b>${counts.rejected}</b>&nbsp;rejected</span>
+    `;
+  }
+
+  function mediaMarkup(item) {
+    const src = escapeHtml(item.asset_url);
+    if (item.type === "reel") {
+      return `<video controls preload="metadata" src="${src}"></video>`;
+    }
+    return `<img src="${src}" alt="${escapeHtml(item.caption).slice(0, 140)}" loading="lazy" />`;
+  }
+
+  function cardMarkup(item) {
+    const status = statusOf(item);
+    const hashtags = (item.hashtags || [])
+      .map((h) => `<span class="hashtag">#${escapeHtml(h)}</span>`)
+      .join("");
+    return `
+      <article class="card" data-id="${escapeHtml(item.id)}">
+        <div class="media-wrap">
+          ${mediaMarkup(item)}
+          <div class="badge-row">
+            <span class="type-badge">${escapeHtml(item.type)}</span>
+            <span class="source-badge">${escapeHtml(item.source)}</span>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="caption">${escapeHtml(item.caption)}</p>
+          ${hashtags ? `<div class="hashtags">${hashtags}</div>` : ""}
+          <div class="card-footer">
+            <span class="status-pill ${status}">${status}</span>
+            <div class="decision-btns">
+              <button type="button" class="approve-btn ${status === "approved" ? "active" : ""}" data-action="approved">Approve</button>
+              <button type="button" class="reject-btn ${status === "rejected" ? "active" : ""}" data-action="rejected">Reject</button>
+            </div>
+          </div>
+        </div>
+      </article>
+    `;
+  }
+
+  function render() {
+    if (!queue.length) {
+      contentEl.innerHTML = `<p class="empty-state">Queue is empty.</p>`;
+      renderStats();
+      return;
+    }
+
+    const byDate = new Map();
+    for (const item of queue) {
+      if (!byDate.has(item.scheduled_date)) byDate.set(item.scheduled_date, []);
+      byDate.get(item.scheduled_date).push(item);
+    }
+    const sortedDates = [...byDate.keys()].sort();
+
+    contentEl.innerHTML = sortedDates
+      .map((dateStr) => {
+        const items = byDate.get(dateStr).slice().sort((a, b) => (a.type === b.type ? 0 : a.type === "post" ? -1 : 1));
+        const { weekday, rest } = formatDayHeading(dateStr);
+        return `
+          <section class="day-section">
+            <div class="day-header">
+              <h2>${weekday}</h2>
+              <span class="day-date">${rest}</span>
+            </div>
+            <div class="card-row">
+              ${items.map(cardMarkup).join("")}
+            </div>
+          </section>
+        `;
+      })
+      .join("");
+
+    renderStats();
+  }
+
+  contentEl.addEventListener("click", (event) => {
+    const btn = event.target.closest("button[data-action]");
+    if (!btn) return;
+    const card = event.target.closest(".card");
+    const id = card.dataset.id;
+    const action = btn.dataset.action;
+    const current = statusOf(queue.find((i) => i.id === id));
+    decisions[id] = current === action ? "pending" : action;
+    render();
+  });
+
+  async function loadQueue() {
+    try {
+      const response = await fetch(QUEUE_URL, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      queue = await response.json();
+      statusLine.textContent = `Loaded ${queue.length} queued items from GitHub. Decisions made here only apply once exported and committed back to content/queue.json.`;
+      statusLine.classList.remove("error");
+      exportBtn.disabled = !window.claude?.downloads;
+      render();
+    } catch (err) {
+      statusLine.textContent = `Couldn't load queue.json: ${err.message}. Check that the file exists at the expected path on the master branch.`;
+      statusLine.classList.add("error");
+      contentEl.innerHTML = `<p class="load-state">Nothing to show.</p>`;
+    }
+  }
+
+  exportBtn.addEventListener("click", async () => {
+    if (!window.claude?.downloads) {
+      showToast("Downloads aren't available in this view.");
+      return;
+    }
+    const patched = queue.map((item) => ({ ...item, status: statusOf(item) }));
+    const data = JSON.stringify(patched, null, 2);
+    try {
+      await window.claude.downloads.save({ filename: "queue.json", data });
+      showToast("Saved queue.json with your decisions.");
+    } catch (err) {
+      const code = err?.code || "unavailable";
+      const messages = {
+        declined: "Save was declined.",
+        rate_limited: "A save prompt is already open — try again in a moment.",
+        too_large: "File is too large to save.",
+        unavailable: "Downloads aren't available in this view.",
+      };
+      showToast(messages[code] || `Couldn't save: ${err?.message || code}`);
+    }
+  });
+
+  loadQueue();
+</script>
