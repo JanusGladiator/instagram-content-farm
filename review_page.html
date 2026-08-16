@@ -320,6 +320,7 @@
 
   let queue = [];
   const decisions = {};
+  let downloads = null;
 
   function showToast(message) {
     toastEl.textContent = message;
@@ -451,7 +452,8 @@
       queue = await response.json();
       statusLine.textContent = `Loaded ${queue.length} queued items from GitHub. Decisions made here only apply once exported and committed back to content/queue.json.`;
       statusLine.classList.remove("error");
-      exportBtn.disabled = !window.claude?.downloads;
+      downloads = (await window.claude?.use?.("downloads")) ?? null;
+      exportBtn.disabled = !downloads;
       render();
     } catch (err) {
       statusLine.textContent = `Couldn't load queue.json: ${err.message}. Check that the file exists at the expected path on the master branch.`;
@@ -461,14 +463,14 @@
   }
 
   exportBtn.addEventListener("click", async () => {
-    if (!window.claude?.downloads) {
+    if (!downloads) {
       showToast("Downloads aren't available in this view.");
       return;
     }
     const patched = queue.map((item) => ({ ...item, status: statusOf(item) }));
     const data = JSON.stringify(patched, null, 2);
     try {
-      await window.claude.downloads.save({ filename: "queue.json", data });
+      await downloads.save({ filename: "queue.json", data });
       showToast("Saved queue.json with your decisions.");
     } catch (err) {
       const code = err?.code || "unavailable";
